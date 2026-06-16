@@ -7,6 +7,7 @@ using Mx43Sim.Core.Cfg;
 using Mx43Sim.Core.Domain;
 using Mx43Sim.Core.Modbus;
 using Mx43Sim.Core.Sim;
+using Mx43Sim.Core.Updates;
 
 namespace Mx43Sim.Tests;
 
@@ -54,6 +55,7 @@ internal static class Program
         {
             TestCfgParser();
             TestAddressListParser();
+            TestSelfUpdater();
             TestRegisterStore();
             TestModbusServer();
             TestSimulator();
@@ -126,6 +128,21 @@ internal static class Program
                 if (s.Detector < 1 || s.Detector > 32)  { _failCount++; Console.WriteLine($"  FAIL bad detector {s.Detector}"); }
             }
         }
+        return 0;
+    }
+
+    private static int TestSelfUpdater()
+    {
+        // Pure-function tests for version comparison. We do NOT hit
+        // the network here; the integration with GitHub releases is
+        // exercised manually in production.
+        Assert("v0.2.0 newer than 0.1.0",  VersionUtils.IsNewer("v0.2.0", "0.1.0"), true);
+        Assert("v0.1.0 not newer than 0.2.0", VersionUtils.IsNewer("v0.1.0", "0.2.0"), false);
+        Assert("v0.2.0 == 0.2.0 (not newer)", VersionUtils.IsNewer("v0.2.0", "0.2.0"), false);
+        Assert("v1.0.0 newer than 0.9.99", VersionUtils.IsNewer("v1.0.0", "0.9.99"), true);
+        Assert("v0.10.0 newer than 0.9.0", VersionUtils.IsNewer("v0.10.0", "0.9.0"), true);
+        Assert("v0.2.1 newer than 0.2.0",  VersionUtils.IsNewer("v0.2.1", "0.2.0"), true);
+        Assert("invalid input returns false", VersionUtils.IsNewer("not-a-version", "0.1.0"), false);
         return 0;
     }
 

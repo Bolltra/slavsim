@@ -25,14 +25,19 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Read tag name
+      - name: Read tag and version
         id: tag
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
-            echo "name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            RAW="${GITHUB_REF#refs/tags/}"
           else
-            echo "name=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+            RAW="${{ github.event.inputs.tag }}"
           fi
+          # Strip the 'v' or 'V' prefix; .NET does not accept it in -p:Version.
+          VERSION="${RAW#v}"
+          VERSION="${VERSION#V}"
+          echo "name=${RAW}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Publish single-file Windows build
         run: |
@@ -44,6 +49,9 @@ jobs:
             -p:IncludeNativeLibrariesForSelfExtract=true \
             -p:EnableCompressionInSingleFile=true \
             -p:DebugType=embedded \
+            -p:Version=${{ steps.tag.outputs.version }} \
+            -p:AssemblyVersion=${{ steps.tag.outputs.version }} \
+            -p:InformationalVersion=${{ steps.tag.outputs.name }} \
             -o publish/win-x64
 
       - name: Prepare distribution folder

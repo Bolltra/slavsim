@@ -98,6 +98,9 @@ public sealed class MainForm : Form
         _trkMeas.Scroll += (_, _) => _numMeas.Value = _trkMeas.Value;
         _numMeas.ValueChanged += (_, _) => _trkMeas.Value = (int)_numMeas.Value;
         _grid.SelectionChanged += (_, _) => OnSelectionChanged();
+
+        // Self-update check (fire-and-forget)
+        Shown += async (_, _) => await SelfUpdater.CheckForUpdateAsync(this);
     }
 
     private void BuildEditor()
