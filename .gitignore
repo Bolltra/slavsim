@@ -1,0 +1,50 @@
+# Build output
+bin/
+obj/
+out/
+publish/
+*.user
+*.suo
+
+# .NET toolchain
+.vs/
+.vscode/
+*.swp
+*.swo
+
+# Test results
+TestResults/
+*.coverage
+*.trx
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+*.lock.json
+project.lock.json
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# IDE
+.idea/
+*.sln.docstates
+*.userprefs
+
+# Misc
+*.log
+*.tmp
+*.bak
+*.orig
+
+# Test fixtures (project-specific, confidential)
+# Drop real .cfg, .xls and .xlsx files into tests/fixtures/ to run the
+# smoke tests; they are intentionally NOT committed.
+*.cfg
+*.xlsx
+*.xls

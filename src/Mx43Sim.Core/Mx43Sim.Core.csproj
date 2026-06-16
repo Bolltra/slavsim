@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>Mx43Sim.Core</RootNamespace>
+    <AssemblyName>Mx43Sim.Core</AssemblyName>
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Modbus\mx43_address_map.json" />
+  </ItemGroup>
+</Project>

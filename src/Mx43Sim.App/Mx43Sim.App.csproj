@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>Mx43Sim.App</RootNamespace>
+    <AssemblyName>Mx43Sim</AssemblyName>
+    <!-- Allows building for Windows targets from non-Windows hosts (e.g. Linux CI) -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <!-- Accept any 10.x runtime on the target machine, not just the
+         exact build version. This avoids the "You must install or
+         update .NET" dialog when a newer 10.x is installed. -->
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Mx43Sim.Core\Mx43Sim.Core.csproj" />
+  </ItemGroup>
+</Project>
