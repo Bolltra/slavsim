@@ -118,62 +118,33 @@ public sealed class Mx43RegisterStore
 
     private void PackOne(DetectorState d)
     {
-        int baseReg;
+        // The Mx43 adresslista.xlsx says there is exactly ONE config
+        // register per detector (1..256). The cahier describes a
+        // theoretical 68-register block but in practice the slave
+        // display reads config as a single 16-bit value (probably a
+        // detector index) and looks up labels/gas/thresholds from
+        // its own internal table. We therefore only write the
+        // measurement and alarm registers, leaving config untouched
+        // so the slave can keep whatever it was configured with.
+        //
+        // If you need to set measurement/alarm live (which is the
+        // whole point of the simulator) those work fine via the
+        // MeasurementReg / AlarmReg registers below.
         int measurementReg;
         int alarmReg;
         if (d.IsAnalog)
         {
             int ch = d.Detector - 32;
-            baseReg = Mx43AddressMap.AnalogConfigBaseFor(ch);
             measurementReg = Mx43AddressMap.AnalogMeasurementRegFor(ch);
-            alarmReg = Mx43AddressMap.AnalogAlarmRegFor(ch);
+            alarmReg       = Mx43AddressMap.AnalogAlarmRegFor(ch);
         }
         else
         {
-            baseReg = Mx43AddressMap.ConfigBaseFor(d.Line, d.Detector);
             measurementReg = Mx43AddressMap.MeasurementRegFor(d.Line, d.Detector);
-            alarmReg = Mx43AddressMap.AlarmRegFor(d.Line, d.Detector);
+            alarmReg       = Mx43AddressMap.AlarmRegFor(d.Line, d.Detector);
         }
-
-        var c = d.Config;
-        // Label (2x16 wchar) -> 16 registers
-        WriteUtf16(baseReg + 0, c.Label, 16);
-        // STATUS
-        WriteRegU(baseReg + 16, (ushort)(d.Enabled ? 1 : 0));
-        // Gas name (2x20 wchar) -> 20 registers
-        WriteUtf16(baseReg + 17, c.Label, 20);   // gas name == label in this .cfg
-        // Range
-        WriteRegU(baseReg + 37, (ushort)c.Range);
-        // Display format
-        WriteRegU(baseReg + 38, (ushort)c.DisplayFormat);
-        // Unit (2x5 wchar) -> 5 registers
-        WriteUtf16(baseReg + 39, c.Unit, 5);
-        // Abbreviated gas name (2x6 wchar) -> 6 registers
-        WriteUtf16(baseReg + 44, c.ShortGasName, 6);
-        // Bar led
-        WriteRegU(baseReg + 50, (ushort)c.BarLed);
-        // Thresholds
-        WriteReg(baseReg + 51, (short)c.Thresholds.Inst1);
-        WriteReg(baseReg + 52, (short)c.Thresholds.Inst2);
-        WriteReg(baseReg + 53, (short)c.Thresholds.Inst3);
-        WriteReg(baseReg + 54, (short)c.Thresholds.Avg1);
-        WriteReg(baseReg + 55, (short)c.Thresholds.Avg2);
-        WriteReg(baseReg + 56, (short)c.Thresholds.Avg3);
-        WriteReg(baseReg + 57, (short)c.Thresholds.Underscale);
-        WriteReg(baseReg + 58, (short)c.Thresholds.Overscale);
-        WriteReg(baseReg + 59, (short)c.Thresholds.Fault);
-        WriteReg(baseReg + 60, (short)c.Thresholds.OutOfRange);
-        WriteRegU(baseReg + 61, (ushort)c.AveragingTime1);
-        WriteRegU(baseReg + 62, (ushort)c.AveragingTime2);
-        WriteRegU(baseReg + 63, (ushort)c.AveragingTime3);
-        WriteRegU(baseReg + 64, (ushort)c.Hysteresis);
-        WriteRegU(baseReg + 65, (ushort)c.EnableFlags);
-        WriteRegU(baseReg + 66, (ushort)c.AckFlags);
-        WriteRegU(baseReg + 67, (ushort)c.EdgeFlags);
-
-        // Live values
-        WriteReg(measurementReg, d.Measurement);
-        WriteRegU(alarmReg, (ushort)d.ActiveAlarms);
+        WriteReg (measurementReg, d.Measurement);
+        WriteRegU(alarmReg,       (ushort)d.ActiveAlarms);
     }
 
     private void WriteUtf16(int startReg, string text, int registerCount)
