@@ -1,0 +1,12 @@
+Copyright (c) 2026 PPM Industrial AB. All rights reserved.
+
+This software is proprietary and confidential. It is licensed for
+internal use within PPM Industrial AB only. No part of this software
+may be copied, modified, distributed or made available to any third
+party without the prior written consent of PPM Industrial AB.
+
+The MX43 controller, the .cfg file format and the Modbus register map
+referenced in this software are products of Teledyne / Oldham and are
+used here under fair-use reverse-engineering for compatibility with
+the company's own configuration files. All trademarks belong to their
+respective owners.
