@@ -21,8 +21,9 @@ src\Mx43Sim.App\bin\Release\net10.0-windows\Mx43Sim.exe
 ```
 
 ```powershell
-# Windows — produce a self-contained .exe (no .NET install required on the target)
-dotnet publish src\Mx43Sim.App\Mx43Sim.App.csproj -c Release -r win-x64 --self-contained true
+# Windows — produce a self-contained SINGLE-FILE .exe (no .NET install
+# required on the target, no DLLs to keep alongside — just one .exe)
+dotnet publish src\Mx43Sim.App\Mx43Sim.App.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true
 src\Mx43Sim.App\bin\Release\net10.0-windows\win-x64\publish\Mx43Sim.exe
 ```
 

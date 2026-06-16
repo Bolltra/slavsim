@@ -34,20 +34,29 @@ jobs:
             echo "name=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Publish self-contained Windows build
+      - name: Publish single-file Windows build
         run: |
           dotnet publish src/Mx43Sim.App/Mx43Sim.App.csproj \
             -c Release \
             -r win-x64 \
             --self-contained true \
-            -p:PublishSingleFile=false \
+            -p:PublishSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -p:EnableCompressionInSingleFile=true \
             -p:DebugType=embedded \
             -o publish/win-x64
 
+      - name: Prepare distribution folder
+        run: |
+          mkdir -p dist
+          cp publish/win-x64/Mx43Sim.exe "dist/Mx43Sim.exe"
+          cp LICENSE dist/LICENSE
+          ls -la dist/
+
       - name: Package as zip
         run: |
-          cd publish
-          zip -r "../Mx43Sim-${{ steps.tag.outputs.name }}-win-x64.zip" win-x64
+          cd dist
+          zip -r "../Mx43Sim-${{ steps.tag.outputs.name }}-win-x64.zip" .
           cd ..
           ls -la "Mx43Sim-${{ steps.tag.outputs.name }}-win-x64.zip"
 
@@ -58,5 +67,4 @@ jobs:
           generate_release_notes: true
           files: |
             Mx43Sim-${{ steps.tag.outputs.name }}-win-x64.zip
-            LICENSE
           fail_on_unmatched_files: false
