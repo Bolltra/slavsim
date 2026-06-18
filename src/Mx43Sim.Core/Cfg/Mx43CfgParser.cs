@@ -43,6 +43,7 @@ public sealed class Mx43CfgParser
         ParseZones(cfg);
         ParseModulesAndRelays(cfg);
         ParseSensors(cfg);
+        AssignLinesFromDetectorList(cfg);
         return cfg;
     }
 
@@ -162,20 +163,24 @@ public sealed class Mx43CfgParser
 
     private void ParseSensors(Mx43Config cfg)
     {
+        // Read the 0xA000 sensor records (gas config: thresholds, units,
+        // enable flags). Line/Detector are NOT derived from the record's
+        // position here; they are assigned afterwards by
+        // AssignLinesFromDetectorList(), which reads the packed
+        // detector list at 0x9A00 where each entry carries a global
+        // sensorId = (line-1)*32 + det.
         int sensorIdx = 0;
         for (int off = SensorRecordBase; off + SensorRecordSize <= 0xAFE0; off += SensorRecordSize)
         {
-            int line = (sensorIdx / 32) + 1;
-            int det  = (sensorIdx % 32) + 1;
-            if (line > 8) break;
+            if (sensorIdx >= 32) break;   // hard cap: 32 detectors per line
 
             var label = ReadUtf16(off + 0x00, 16).TrimEnd('\0', ' ');
             if (string.IsNullOrWhiteSpace(label)) { sensorIdx++; continue; }
 
             var s = new Sensor
             {
-                Line = line,
-                Detector = det,
+                Line = 1,             // placeholder; fixed by AssignLinesFromDetectorList
+                Detector = sensorIdx + 1,
                 Label = label,
                 Range = ReadUInt16(off + 0x28),
                 DisplayFormat = ReadUInt16(off + 0x2A),
@@ -226,6 +231,119 @@ public sealed class Mx43CfgParser
             cfg.Sensors.Add(s);
             sensorIdx++;
         }
+    }
+
+    // -------- Detector list at 0x9A00 --------
+    //
+    // The .cfg stores a packed, variable-length list of detector
+    // definitions at 0x9A00. Each entry is:
+    //
+    //   word 0  sensorId   (global 1-based index across all 8 lines,
+    //                       i.e. (line-1)*32 + det)
+    //   word 1  moduleId   (the physical MX43 module the detector is
+    //                       wired to; not the same as the module-id
+    //                       used by relay records)
+    //   word 2  inputIndex (0..7 within the module)
+    //   UTF-16 null-terminated display name (variable length, padded
+    //                       so the next entry starts on an even byte)
+    //
+    // The list is in the same order as the sensor records at 0xA000,
+    // so entry N corresponds to the N-th non-empty 0xA000 record. We
+    // use the sensorId to compute Line/Detector for each Sensor,
+    // which is how the .cfg encodes the Modbus line assignment.
+    //
+    // Verified against the Volvo Skövde MX43-8 export (19 detectors
+    // across 2 lines): sensorIds 1-3 -> line 1 det 1-3 (Kylmaskin),
+    // 33-40 -> line 2 det 1-8 (NH3 analog-input module),
+    // 41-48 -> line 2 det 9-16 (CO/H2).
+
+    private void AssignLinesFromDetectorList(Mx43Config cfg)
+    {
+        var entries = ParseDetectorList();
+        if (entries.Count == 0) return;
+
+        // Pair entries with sensors in order. If the counts differ we
+        // still assign what we can; the remaining sensors keep their
+        // file-position-derived Line/Detector.
+        //
+        // The first word of each 0x9A00 entry is either:
+        //   - a global 1-based sensor index sensorId = (line-1)*32 + det
+        //     (used by COM43 when it has explicitly placed the detector
+        //      on a line, e.g. Volvo, Nynäs, Gotland, ppm1), or
+        //   - 0x0100 (256) for direct 4-20 mA channels. In that case
+        //     inputIndex is the 0-based line number and the detector is
+        //     always detector 1 on that line (verified by ppm.cfg and
+        //     the Nynäs screenshots), or
+        //   - high ids 225..255, which are still regular global ids
+        //     and therefore map to line 8 (225 = L8D1, 226 = L8D2,
+        //     ...). This is visible in exports that also carry L8M...
+        //     module definitions in the 0x8500 table.
+        //
+        int n = Math.Min(entries.Count, cfg.Sensors.Count);
+        for (int i = 0; i < n; i++)
+        {
+            int sid = entries[i].SensorId;
+            if (sid >= 1 && sid <= 255)
+            {
+                cfg.Sensors[i].Line     = (sid - 1) / 32 + 1;
+                cfg.Sensors[i].Detector = (sid - 1) % 32 + 1;
+            }
+            else if (sid == 0x0100)
+            {
+                cfg.Sensors[i].Line     = entries[i].InputIndex + 1;
+                cfg.Sensors[i].Detector = 1;
+            }
+            // The display name from 0x9A00 is the operator-facing label
+            // (e.g. "Ugn 1 NH3"); prefer it over the gas name stored
+            // in the 0xA000 record when present.
+            if (!string.IsNullOrWhiteSpace(entries[i].DisplayName))
+                cfg.Sensors[i].Label = entries[i].DisplayName;
+        }
+    }
+
+    private sealed record DetectorEntry(int SensorId, int ModuleId, int InputIndex, string DisplayName);
+
+    private List<DetectorEntry> ParseDetectorList()
+    {
+        var list = new List<DetectorEntry>();
+        int off = 0x9A00;
+        int limit = Math.Min(0xA000, _data.Length);
+        int guard = 0;
+        while (off + 6 <= limit && guard < 64)
+        {
+            int sid = ReadUInt16(off);
+            // Skip padding/alignment bytes until we find a plausible sid.
+            if (sid < 1 || sid > 0x100)
+            {
+                off += 2;
+                continue;
+            }
+            int modId = ReadUInt16(off + 2);
+            int idx   = ReadUInt16(off + 4);
+
+            // Read the UTF-16 null-terminated display name and advance
+            // past it. Names are at most ~17 wchar; we cap at 32 to be
+            // safe.
+            var sb = new StringBuilder();
+            int j = 6;
+            while (j < 0x40 && off + j + 1 < limit)
+            {
+                ushort v = (ushort)(_data[off + j] | (_data[off + j + 1] << 8));
+                if (v == 0) { j += 2; break; }
+                sb.Append(32 <= v && v <= 126 ? (char)v : '?');
+                j += 2;
+            }
+            if (j == 6)
+            {
+                // No name: not a real entry, skip.
+                off += 2;
+                continue;
+            }
+            list.Add(new DetectorEntry(sid, modId, idx, sb.ToString().TrimEnd()));
+            off += j;
+            guard++;
+        }
+        return list;
     }
 
     // -------- Low-level helpers --------

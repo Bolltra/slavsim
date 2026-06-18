@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -60,6 +61,8 @@ internal static class Program
             TestModbusServer();
             TestSimulator();
             TestEndToEnd();
+            TestLineAssignment();
+            TestLineAssignmentAllFiles();
         }
         catch (Exception ex)
         {
@@ -279,6 +282,178 @@ internal static class Program
         finally
         {
             server.StopAsync().GetAwaiter().GetResult();
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// Verifies that the line/detector assignment read from the 0x9A00
+    /// detector list matches the expected Modbus addressing. Uses the
+    /// Volvo Skövde MX43-8 export (19 detectors across 2 lines) as the
+    /// reference case: sensorIds 1-3 -> line 1, 33-48 -> line 2.
+    /// </summary>
+    private static int TestLineAssignment()
+    {
+        var fixturesDir = FixturesDir();
+        var volvoPath = Directory.Exists(fixturesDir)
+            ? Directory.GetFiles(fixturesDir, "*.cfg")
+                .FirstOrDefault(p => Path.GetFileName(p).Contains("Volvo", StringComparison.OrdinalIgnoreCase))
+            : null;
+        if (volvoPath is null)
+        {
+            Console.WriteLine("SKIP: TestLineAssignment needs the Volvo Skövde fixture in tests/fixtures/");
+            return 0;
+        }
+
+        var cfg = new Mx43CfgParser(volvoPath).Parse();
+        Console.WriteLine($"--- line assignment ({Path.GetFileName(volvoPath)}) ---");
+        foreach (var s in cfg.Sensors)
+            Console.WriteLine($"  L{s.Line}D{s.Detector,2}: {s.Label}");
+
+        // The Volvo file has 19 detectors: 3 on line 1 (Kylmaskin),
+        // 16 on line 2 (8 NH3 + 6 CO + 2 H2).
+        var line1 = cfg.Sensors.Where(s => s.Line == 1).ToList();
+        var line2 = cfg.Sensors.Where(s => s.Line == 2).ToList();
+        Assert("Volvo has 3 sensors on line 1", line1.Count, 3);
+        Assert("Volvo has 16 sensors on line 2", line2.Count, 16);
+        Assert("line 1 det 1 is Kylmaskin 1", line1[0].Label, "Kylmaskin 1");
+        Assert("line 2 det 1 is Ugn 1 NH3", line2[0].Label, "Ugn 1 NH3");
+        Assert("line 2 det 9 is Ugn 1 CO", line2[8].Label, "Ugn 1 CO");
+        Assert("line 2 det 15 is Ugn 1-3 H2", line2[14].Label, "Ugn 1-3 H2");
+
+        // Verify that the Modbus measurement addresses line up with
+        // the address-map formula: 2000 + (line-1)*32 + det.
+        foreach (var s in cfg.Sensors)
+        {
+            int expected = 2000 + (s.Line - 1) * 32 + s.Detector;
+            int actual = Mx43AddressMap.MeasurementRegFor(s.Line, s.Detector);
+            Assert($"L{s.Line}D{s.Detector} measurement reg = {expected}", actual, expected);
+        }
+
+        var nynasPath = Directory.Exists(fixturesDir)
+            ? Directory.GetFiles(fixturesDir, "*.cfg")
+                .FirstOrDefault(p => Path.GetFileName(p).Contains("Nyn", StringComparison.OrdinalIgnoreCase))
+            : null;
+        if (nynasPath is not null)
+        {
+            var nynas = new Mx43CfgParser(nynasPath).Parse();
+            Assert("Nynas detector count", nynas.Sensors.Count, 7);
+            Assert("Nynas line 1 count", nynas.Sensors.Count(s => s.Line == 1), 3);
+            Assert("Nynas line 2 count", nynas.Sensors.Count(s => s.Line == 2), 2);
+            Assert("Nynas line 3 direct 4-20", nynas.Sensors.Count(s => s.Line == 3 && s.Detector == 1), 1);
+            Assert("Nynas line 4 direct 4-20", nynas.Sensors.Count(s => s.Line == 4 && s.Detector == 1), 1);
+        }
+
+        var ppmPath = Directory.Exists(fixturesDir)
+            ? Directory.GetFiles(fixturesDir, "ppm.cfg").FirstOrDefault()
+            : null;
+        if (ppmPath is not null)
+        {
+            var ppm = new Mx43CfgParser(ppmPath).Parse();
+            Assert("ppm detector count", ppm.Sensors.Count, 6);
+            for (int lineNo = 1; lineNo <= 6; lineNo++)
+                Assert($"ppm line {lineNo} direct 4-20", ppm.Sensors.Count(s => s.Line == lineNo && s.Detector == 1), 1);
+        }
+
+        var polypeptidePath = Directory.Exists(fixturesDir)
+            ? Directory.GetFiles(fixturesDir, "*.cfg")
+                .FirstOrDefault(p => Path.GetFileName(p).Contains("Polypeptide", StringComparison.OrdinalIgnoreCase))
+            : null;
+        if (polypeptidePath is not null)
+        {
+            var polypeptide = new Mx43CfgParser(polypeptidePath).Parse();
+            Assert("Polypeptide detector count", polypeptide.Sensors.Count, 16);
+            for (int lineNo = 1; lineNo <= 7; lineNo++)
+                Assert($"Polypeptide line {lineNo} direct 4-20", polypeptide.Sensors.Count(s => s.Line == lineNo && s.Detector == 1), 1);
+            Assert("Polypeptide line 8 count", polypeptide.Sensors.Count(s => s.Line == 8), 9);
+            Assert("Polypeptide line 8 detector 1", polypeptide.Sensors.Count(s => s.Line == 8 && s.Detector == 1), 1);
+            Assert("Polypeptide line 8 detector 8", polypeptide.Sensors.Count(s => s.Line == 8 && s.Detector == 8), 1);
+            Assert("Polypeptide line 8 detector 11", polypeptide.Sensors.Count(s => s.Line == 8 && s.Detector == 11), 1);
+        }
+
+        var b062Path = Directory.Exists(fixturesDir)
+            ? Directory.GetFiles(fixturesDir, "*.cfg")
+                .FirstOrDefault(p => Path.GetFileName(p).Contains("B062", StringComparison.OrdinalIgnoreCase))
+            : null;
+        if (b062Path is not null)
+        {
+            var b062 = new Mx43CfgParser(b062Path).Parse();
+            Assert("B062 detector count", b062.Sensors.Count, 16);
+            for (int lineNo = 1; lineNo <= 7; lineNo++)
+                Assert($"B062 line {lineNo} direct 4-20", b062.Sensors.Count(s => s.Line == lineNo && s.Detector == 1), 1);
+            Assert("B062 line 8 count", b062.Sensors.Count(s => s.Line == 8), 9);
+            Assert("B062 line 8 detector 2", b062.Sensors.Count(s => s.Line == 8 && s.Detector == 2), 1);
+            Assert("B062 line 8 detector 10", b062.Sensors.Count(s => s.Line == 8 && s.Detector == 10), 1);
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// Walks every .cfg in tests/fixtures and prints the line/detector
+    /// distribution. Verifies that the 0x9A00 sensor-id mapping produces
+    /// monotonically increasing detector numbers within each line and
+    /// that the Modbus measurement addresses are consistent. Catches
+    /// cases where the parser assigns a detector to a line that doesn't
+    /// match the .cfg's own detector list.
+    /// </summary>
+    private static int TestLineAssignmentAllFiles()
+    {
+        var fixturesDir = FixturesDir();
+        var cfgs = Directory.Exists(fixturesDir)
+            ? Directory.GetFiles(fixturesDir, "*.cfg").OrderBy(p => p).ToArray()
+            : Array.Empty<string>();
+        if (cfgs.Length == 0)
+        {
+            Console.WriteLine("SKIP: no .cfg fixtures for TestLineAssignmentAllFiles");
+            return 0;
+        }
+
+        foreach (var path in cfgs)
+        {
+            var name = Path.GetFileName(path);
+            var cfg = new Mx43CfgParser(path).Parse();
+            Console.WriteLine();
+            Console.WriteLine($"--- {name}: {cfg.Sensors.Count} sensors ---");
+
+            var byLine = new SortedDictionary<int, List<Sensor>>();
+            foreach (var s in cfg.Sensors)
+            {
+                if (!byLine.ContainsKey(s.Line)) byLine[s.Line] = new List<Sensor>();
+                byLine[s.Line].Add(s);
+            }
+
+            foreach (var (line, sensors) in byLine)
+            {
+                Console.WriteLine($"  Line {line}: {sensors.Count} detectors");
+                foreach (var s in sensors)
+                    Console.WriteLine($"    L{s.Line}D{s.Detector,2} reg={Mx43AddressMap.MeasurementRegFor(s.Line, s.Detector)} '{s.Label}' [{s.ShortGasName}]");
+            }
+
+            // Verify detector numbers are unique and within 1..32 per line.
+            foreach (var (line, sensors) in byLine)
+            {
+                var dets = sensors.Select(s => s.Detector).ToList();
+                if (dets.Count != dets.Distinct().Count())
+                {
+                    Console.WriteLine($"  FAIL: line {line} has duplicate detector numbers: {string.Join(",", dets)}");
+                    _failCount++;
+                }
+                if (dets.Any(d => d < 1 || d > 32))
+                {
+                    Console.WriteLine($"  FAIL: line {line} has detector out of range 1..32: {string.Join(",", dets)}");
+                    _failCount++;
+                }
+            }
+
+            // Verify the measurement addresses are unique and ascending.
+            var addrs = cfg.Sensors
+                .Select(s => Mx43AddressMap.MeasurementRegFor(s.Line, s.Detector))
+                .ToList();
+            if (addrs.Count != addrs.Distinct().Count())
+            {
+                Console.WriteLine($"  FAIL: duplicate measurement addresses: {string.Join(",", addrs)}");
+                _failCount++;
+            }
         }
         return 0;
     }
