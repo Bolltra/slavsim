@@ -19,6 +19,8 @@ public sealed class MainForm : Form
     private readonly Mx43Simulator _sim;
     private Mx43ModbusServer? _server;
     private Mx43Config? _config;
+    private bool _syncingMeasurementEditor;
+    private bool _updatingGrid;
 
     private readonly TextBox _log = new();
     private readonly DataGridView _grid = new();
@@ -65,7 +67,7 @@ public sealed class MainForm : Form
         _grid.Dock = DockStyle.Fill;
         _grid.AllowUserToAddRows = false;
         _grid.AllowUserToDeleteRows = false;
-        _grid.ReadOnly = true;
+        _grid.ReadOnly = false;
         _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
         _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         _grid.Columns.Add("addr", "Mät-adress");
@@ -75,11 +77,18 @@ public sealed class MainForm : Form
         _grid.Columns.Add("gas", "Gas");
         _grid.Columns.Add("unit", "Enhet");
         _grid.Columns.Add("range", "Range");
+        _grid.Columns.Add("format", "Format");
         _grid.Columns.Add("inst1", "Alarm 1");
         _grid.Columns.Add("inst2", "Alarm 2");
         _grid.Columns.Add("inst3", "Alarm 3");
+        _grid.Columns.Add("under", "Under");
+        _grid.Columns.Add("over", "Över");
+        _grid.Columns.Add("oor", "OOR");
         _grid.Columns.Add("meas", "Mätning");
         _grid.Columns.Add("alarms", "Aktiva larm");
+        var addrColumn = _grid.Columns["addr"] ?? throw new InvalidOperationException("Grid address column missing.");
+        addrColumn.ReadOnly = true;
+        addrColumn.DefaultCellStyle.BackColor = SystemColors.Control;
         split.Panel1.Controls.Add(_grid);
         _log.Dock = DockStyle.Fill;
         _log.Multiline = true;
@@ -98,9 +107,12 @@ public sealed class MainForm : Form
         _btnStop.Click += async (_, _) => await StopServerAsync();
         _btnApply.Click += (_, _) => ApplyMeasurement();
         _btnClear.Click += (_, _) => ClearAlarms();
-        _trkMeas.Scroll += (_, _) => _numMeas.Value = _trkMeas.Value;
-        _numMeas.ValueChanged += (_, _) => _trkMeas.Value = (int)_numMeas.Value;
+        _trkMeas.Scroll += (_, _) => SyncMeasurementNumberFromTrackBar();
+        _numMeas.ValueChanged += (_, _) => SyncTrackBarFromMeasurementNumber();
         _grid.SelectionChanged += (_, _) => OnSelectionChanged();
+        _grid.CellValidating += OnGridCellValidating;
+        _grid.CellEndEdit += OnGridCellEndEdit;
+        _grid.DataError += (_, e) => { e.ThrowException = false; };
 
         // Self-update check (fire-and-forget)
         Shown += async (_, _) => await SelfUpdater.CheckForUpdateAsync(this);
@@ -167,49 +179,54 @@ public sealed class MainForm : Form
 
     private void PopulateGrid()
     {
+        _updatingGrid = true;
         _grid.Rows.Clear();
-        if (_config is null) return;
-        foreach (var s in _config.Sensors)
+        try
         {
-            int idx = s.Index;
-            var d = _sim.Store.Detectors[idx];
-            int addr = Mx43AddressMap.MeasurementRegFor(s.Line, s.Detector);
-            _grid.Rows.Add(addr, s.Line, s.Detector, s.Label, s.ShortGasName, s.Unit, s.Range,
-                s.Thresholds.Inst1, s.Thresholds.Inst2, s.Thresholds.Inst3,
-                d.Measurement, d.ActiveAlarms.ToString());
+            if (_config is null) return;
+            foreach (var s in _config.Sensors)
+            {
+                int rowIndex = _grid.Rows.Add();
+                var row = _grid.Rows[rowIndex];
+                row.Tag = s;
+                RefreshGridRow(row, s);
+            }
+        }
+        finally
+        {
+            _updatingGrid = false;
         }
     }
 
     private void OnSelectionChanged()
     {
-        if (_grid.SelectedRows.Count == 0) { _grpEditor.Enabled = false; return; }
+        var row = CurrentGridRow();
+        if (row is null) { _grpEditor.Enabled = false; return; }
         _grpEditor.Enabled = true;
-        var row = _grid.SelectedRows[0];
-        int line = (int)row.Cells["line"].Value;
-        int det = (int)row.Cells["det"].Value;
-        var s = _config?.Sensors.FirstOrDefault(x => x.Line == line && x.Detector == det);
+        var s = row.Tag as Sensor;
         if (s is null) return;
+        RefreshDetectorEditor(row, s);
+    }
+
+    private void RefreshDetectorEditor(DataGridViewRow row, Sensor s)
+    {
         _lblSel.Text = $"Detektor L{s.Line}D{s.Detector} — {s.Label}";
         _lblSelGas.Text = $"Gas: {s.ShortGasName}   Enhet: {s.Unit}";
         _lblSelRange.Text = $"Range: {s.Range}    DisplayFormat: {s.DisplayFormat}";
         _lblSelThresh.Text = $"Tröskelvärden:  A1={s.Thresholds.Inst1}   A2={s.Thresholds.Inst2}   A3={s.Thresholds.Inst3}   " +
                              $"Under={s.Thresholds.Underscale}   Över={s.Thresholds.Overscale}   OOR={s.Thresholds.OutOfRange}";
         var d = _sim.Store.Detectors[s.Index];
-        _numMeas.Value = d.Measurement;
-        _trkMeas.Value = d.Measurement;
-        // Make the trackbar range cover the relevant domain
-        _trkMeas.Minimum = Math.Min(-100, Math.Max(s.Thresholds.Underscale - 50, -32768));
-        _trkMeas.Maximum = Math.Max(s.Thresholds.Overscale + 50, 100);
+        ConfigureMeasurementEditorRange(s, d.Measurement);
         _lblAlarms.Text = "Aktiva larm: " + d.ActiveAlarms;
         _lblAlarms.ForeColor = d.ActiveAlarms == AlarmBits.None ? Color.Black : Color.Red;
     }
 
     private void ApplyMeasurement()
     {
-        if (_grid.SelectedRows.Count == 0 || _config is null) return;
-        var row = _grid.SelectedRows[0];
-        int line = (int)row.Cells["line"].Value;
-        int det = (int)row.Cells["det"].Value;
+        var row = CurrentGridRow();
+        if (row is null || row.Tag is not Sensor s) return;
+        int line = s.Line;
+        int det = s.Detector;
         short v = (short)_numMeas.Value;
         _sim.SetMeasurement(line, det, v);
         // Refresh the grid row + the right-pane summary
@@ -224,16 +241,293 @@ public sealed class MainForm : Form
 
     private void ClearAlarms()
     {
-        if (_grid.SelectedRows.Count == 0 || _config is null) return;
-        var row = _grid.SelectedRows[0];
-        int line = (int)row.Cells["line"].Value;
-        int det = (int)row.Cells["det"].Value;
+        var row = CurrentGridRow();
+        if (row is null || row.Tag is not Sensor s) return;
+        int line = s.Line;
+        int det = s.Detector;
         _sim.SetAlarm(line, det, AlarmBits.None);
         row.Cells["alarms"].Value = AlarmBits.None.ToString();
         row.DefaultCellStyle.BackColor = Color.Empty;
         _lblAlarms.Text = "Aktiva larm: None";
         _lblAlarms.ForeColor = Color.Black;
         Log($"L{line}D{det}: alarms cleared");
+    }
+
+    private DataGridViewRow? CurrentGridRow()
+    {
+        if (_grid.CurrentRow is not null && !_grid.CurrentRow.IsNewRow) return _grid.CurrentRow;
+        return _grid.SelectedRows.Count > 0 ? _grid.SelectedRows[0] : null;
+    }
+
+    private void RefreshGridRow(DataGridViewRow row, Sensor s)
+    {
+        _updatingGrid = true;
+        try
+        {
+            var d = _sim.Store.Detectors[s.Index];
+            row.Cells["addr"].Value = Mx43AddressMap.MeasurementRegFor(s.Line, s.Detector);
+            row.Cells["line"].Value = s.Line;
+            row.Cells["det"].Value = s.Detector;
+            row.Cells["label"].Value = s.Label;
+            row.Cells["gas"].Value = s.ShortGasName;
+            row.Cells["unit"].Value = s.Unit;
+            row.Cells["range"].Value = s.Range;
+            row.Cells["format"].Value = s.DisplayFormat;
+            row.Cells["inst1"].Value = s.Thresholds.Inst1;
+            row.Cells["inst2"].Value = s.Thresholds.Inst2;
+            row.Cells["inst3"].Value = s.Thresholds.Inst3;
+            row.Cells["under"].Value = s.Thresholds.Underscale;
+            row.Cells["over"].Value = s.Thresholds.Overscale;
+            row.Cells["oor"].Value = s.Thresholds.OutOfRange;
+            row.Cells["meas"].Value = d.Measurement;
+            row.Cells["alarms"].Value = d.ActiveAlarms.ToString();
+            row.DefaultCellStyle.BackColor = d.ActiveAlarms == AlarmBits.None ? Color.Empty : Color.MistyRose;
+        }
+        finally
+        {
+            _updatingGrid = false;
+        }
+    }
+
+    private void ConfigureMeasurementEditorRange(Sensor s, short value)
+    {
+        int min = new[] { -100, value, s.Thresholds.Underscale - 50 }.Min();
+        int max = new[] { 100, value, s.Range, s.Thresholds.Overscale + 50, s.Thresholds.OutOfRange + 50, s.Thresholds.Fault + 50 }.Max();
+        min = Math.Max(short.MinValue, min);
+        max = Math.Min(short.MaxValue, max);
+        if (min >= max) { min = short.MinValue; max = short.MaxValue; }
+
+        _syncingMeasurementEditor = true;
+        try
+        {
+            _trkMeas.Minimum = min;
+            _trkMeas.Maximum = max;
+            _numMeas.Minimum = short.MinValue;
+            _numMeas.Maximum = short.MaxValue;
+            _numMeas.Value = value;
+            _trkMeas.Value = Math.Clamp((int)value, _trkMeas.Minimum, _trkMeas.Maximum);
+        }
+        finally
+        {
+            _syncingMeasurementEditor = false;
+        }
+    }
+
+    private void SyncMeasurementNumberFromTrackBar()
+    {
+        if (_syncingMeasurementEditor) return;
+        _syncingMeasurementEditor = true;
+        try
+        {
+            _numMeas.Value = Math.Clamp(_trkMeas.Value, (int)_numMeas.Minimum, (int)_numMeas.Maximum);
+        }
+        finally
+        {
+            _syncingMeasurementEditor = false;
+        }
+    }
+
+    private void SyncTrackBarFromMeasurementNumber()
+    {
+        if (_syncingMeasurementEditor) return;
+        _syncingMeasurementEditor = true;
+        try
+        {
+            int value = (int)_numMeas.Value;
+            _trkMeas.Value = Math.Clamp(value, _trkMeas.Minimum, _trkMeas.Maximum);
+        }
+        finally
+        {
+            _syncingMeasurementEditor = false;
+        }
+    }
+
+    private void OnGridCellValidating(object? sender, DataGridViewCellValidatingEventArgs e)
+    {
+        if (_updatingGrid || e.RowIndex < 0) return;
+        string column = _grid.Columns[e.ColumnIndex].Name;
+        if (column == "addr") return;
+
+        string text = Convert.ToString(e.FormattedValue)?.Trim() ?? "";
+        if (column == "alarms")
+        {
+            if (!TryParseAlarmBits(text, out _)) RejectGridEdit(e, "Aktiva larm måste vara t.ex. None, Inst1, Inst1, Inst2 eller 0x0008.");
+            return;
+        }
+
+        if (!IsIntegerColumn(column)) return;
+        if (!int.TryParse(text, out int value))
+        {
+            RejectGridEdit(e, "Värdet måste vara ett heltal.");
+            return;
+        }
+
+        if (column == "line" && (value < 1 || value > 8)) RejectGridEdit(e, "Line måste vara 1..8.");
+        else if (column == "det" && (value < 1 || value > 32)) RejectGridEdit(e, "Detektor måste vara 1..32.");
+        else if (column == "meas" && (value < short.MinValue || value > short.MaxValue)) RejectGridEdit(e, "Mätvärde måste vara -32768..32767.");
+        else if (column == "range" && (value < 0 || value > ushort.MaxValue)) RejectGridEdit(e, "Range måste vara 0..65535.");
+        else if (column == "format" && (value < 0 || value > 2)) RejectGridEdit(e, "Format måste vara 0, 1 eller 2.");
+        else if (column is "inst1" or "inst2" or "inst3" or "under" or "over" or "oor")
+        {
+            if (value < short.MinValue || value > short.MaxValue) RejectGridEdit(e, "Larmgräns måste vara -32768..32767.");
+        }
+
+        if (!e.Cancel && column is "line" or "det")
+        {
+            var row = _grid.Rows[e.RowIndex];
+            var sensor = row.Tag as Sensor;
+            if (sensor is null) return;
+            int newLine = column == "line" ? value : ReadIntCell(row, "line", sensor.Line);
+            int newDet = column == "det" ? value : ReadIntCell(row, "det", sensor.Detector);
+            bool duplicate = _config?.Sensors.Any(s => !ReferenceEquals(s, sensor) && s.Line == newLine && s.Detector == newDet) == true;
+            if (duplicate) RejectGridEdit(e, $"L{newLine}D{newDet} används redan av en annan kanal.");
+        }
+    }
+
+    private void RejectGridEdit(DataGridViewCellValidatingEventArgs e, string message)
+    {
+        e.Cancel = true;
+        _grid.Rows[e.RowIndex].ErrorText = message;
+        MessageBox.Show(this, message, "Ogiltigt värde", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    private void OnGridCellEndEdit(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (_updatingGrid || e.RowIndex < 0) return;
+        var row = _grid.Rows[e.RowIndex];
+        row.ErrorText = "";
+        if (row.Tag is not Sensor s) return;
+
+        try
+        {
+            ApplyGridEdit(row, s, _grid.Columns[e.ColumnIndex].Name);
+            RefreshGridRow(row, s);
+            if (ReferenceEquals(row, CurrentGridRow())) RefreshDetectorEditor(row, s);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, "Kunde inte uppdatera värdet: " + ex.Message, "Fel", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            RefreshGridRow(row, s);
+        }
+    }
+
+    private void ApplyGridEdit(DataGridViewRow row, Sensor s, string column)
+    {
+        if (column == "addr") return;
+
+        switch (column)
+        {
+            case "line":
+            case "det":
+                RebindSensor(s, ReadIntCell(row, "line", s.Line), ReadIntCell(row, "det", s.Detector));
+                break;
+            case "label":
+                s.Label = ReadTextCell(row, "label");
+                break;
+            case "gas":
+                s.ShortGasName = ReadTextCell(row, "gas");
+                break;
+            case "unit":
+                s.Unit = ReadTextCell(row, "unit");
+                break;
+            case "range":
+                s.Range = ReadIntCell(row, "range", s.Range);
+                break;
+            case "format":
+                s.DisplayFormat = ReadIntCell(row, "format", s.DisplayFormat);
+                break;
+            case "inst1":
+                s.Thresholds.Inst1 = ReadIntCell(row, "inst1", s.Thresholds.Inst1);
+                RecomputeCurrentAlarm(s);
+                break;
+            case "inst2":
+                s.Thresholds.Inst2 = ReadIntCell(row, "inst2", s.Thresholds.Inst2);
+                RecomputeCurrentAlarm(s);
+                break;
+            case "inst3":
+                s.Thresholds.Inst3 = ReadIntCell(row, "inst3", s.Thresholds.Inst3);
+                RecomputeCurrentAlarm(s);
+                break;
+            case "under":
+                s.Thresholds.Underscale = ReadIntCell(row, "under", s.Thresholds.Underscale);
+                RecomputeCurrentAlarm(s);
+                break;
+            case "over":
+                s.Thresholds.Overscale = ReadIntCell(row, "over", s.Thresholds.Overscale);
+                RecomputeCurrentAlarm(s);
+                break;
+            case "oor":
+                s.Thresholds.OutOfRange = ReadIntCell(row, "oor", s.Thresholds.OutOfRange);
+                RecomputeCurrentAlarm(s);
+                break;
+            case "meas":
+                _sim.SetMeasurement(s.Line, s.Detector, (short)ReadIntCell(row, "meas", _sim.GetMeasurement(s.Line, s.Detector)));
+                break;
+            case "alarms":
+                if (TryParseAlarmBits(ReadTextCell(row, "alarms"), out var bits)) _sim.SetAlarm(s.Line, s.Detector, bits);
+                break;
+        }
+    }
+
+    private void RebindSensor(Sensor s, int newLine, int newDetector)
+    {
+        if (s.Line == newLine && s.Detector == newDetector) return;
+        int oldIndex = s.Index;
+        short measurement = _sim.GetMeasurement(s.Line, s.Detector);
+        AlarmBits alarms = _sim.GetAlarm(s.Line, s.Detector);
+
+        if (oldIndex >= 0 && oldIndex < _sim.Store.Detectors.Length)
+        {
+            var oldState = _sim.Store.Detectors[oldIndex];
+            oldState.Config = null;
+            oldState.Measurement = 0;
+            oldState.ActiveAlarms = AlarmBits.None;
+        }
+
+        s.Line = newLine;
+        s.Detector = newDetector;
+        int newIndex = s.Index;
+        var newState = _sim.Store.Detectors[newIndex];
+        newState.Config = s;
+        newState.Measurement = measurement;
+        newState.ActiveAlarms = alarms;
+        _sim.Repack();
+    }
+
+    private void RecomputeCurrentAlarm(Sensor s)
+    {
+        short current = _sim.GetMeasurement(s.Line, s.Detector);
+        _sim.SetMeasurement(s.Line, s.Detector, current);
+    }
+
+    private static string ReadTextCell(DataGridViewRow row, string column)
+        => Convert.ToString(row.Cells[column].Value)?.Trim() ?? "";
+
+    private static int ReadIntCell(DataGridViewRow row, string column, int fallback)
+        => int.TryParse(Convert.ToString(row.Cells[column].Value), out int value) ? value : fallback;
+
+    private static bool IsIntegerColumn(string column)
+        => column is "line" or "det" or "range" or "format" or "inst1" or "inst2" or "inst3" or "under" or "over" or "oor" or "meas";
+
+    private static bool TryParseAlarmBits(string text, out AlarmBits bits)
+    {
+        text = text.Trim();
+        if (text.Length == 0 || text.Equals("None", StringComparison.OrdinalIgnoreCase))
+        {
+            bits = AlarmBits.None;
+            return true;
+        }
+        if (text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) && ushort.TryParse(text[2..], System.Globalization.NumberStyles.HexNumber, null, out ushort hex))
+        {
+            bits = (AlarmBits)hex;
+            return true;
+        }
+        if (ushort.TryParse(text, out ushort numeric))
+        {
+            bits = (AlarmBits)numeric;
+            return true;
+        }
+        return Enum.TryParse(text, true, out bits);
     }
 
     private async Task StartServerAsync()

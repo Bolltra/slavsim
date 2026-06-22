@@ -104,8 +104,8 @@ public sealed class Mx43Simulator
     /// Derive the active alarm bits from the configured thresholds.
     /// MX43 semantics:
     ///   - Alarm 1/2/3 latch when |value| crosses the instantaneous or averaged threshold
-    ///   - Underscale / Overscale latch when value falls outside
-    ///   - OutOfRange latches when value exceeds OutOfRange threshold
+    ///   - Underscale / Overscale latch when value reaches or passes the scale threshold
+    ///   - OutOfRange latches when value reaches or exceeds OutOfRange threshold
     ///   - Fault latches together with OutOfRange
     /// Only the bits whose corresponding Enable bit is set are returned.
     /// </summary>
@@ -123,9 +123,9 @@ public sealed class Mx43Simulator
         if (c.Thresholds.Avg2  != 0 && System.Math.Abs(v) >= c.Thresholds.Avg2)  b |= AlarmBits.Inst2;
         if (c.Thresholds.Avg3  != 0 && System.Math.Abs(v) >= c.Thresholds.Avg3)  b |= AlarmBits.Inst3;
 
-        if (c.Thresholds.Underscale != 0 && v < c.Thresholds.Underscale) b |= AlarmBits.Underscale;
-        if (c.Thresholds.Overscale  != 0 && v > c.Thresholds.Overscale)  b |= AlarmBits.Overscale;
-        if (c.Thresholds.OutOfRange != 0 && System.Math.Abs(v) > c.Thresholds.OutOfRange)
+        if (c.Thresholds.Underscale != 0 && v <= c.Thresholds.Underscale) b |= AlarmBits.Underscale;
+        if (c.Thresholds.Overscale  != 0 && v >= c.Thresholds.Overscale)  b |= AlarmBits.Overscale;
+        if (c.Thresholds.OutOfRange != 0 && System.Math.Abs(v) >= c.Thresholds.OutOfRange)
         {
             b |= AlarmBits.OutOfRange;
             b |= AlarmBits.Fault;

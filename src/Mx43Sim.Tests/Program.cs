@@ -289,11 +289,17 @@ internal static class Program
         sim.SetMeasurement(line, det, 50);
         Assert("at 50: Inst1+2+3", (ushort)store.ReadRegU(alarmReg), (ushort)0x0007);
 
-        sim.SetMeasurement(line, det, 110);
-        Assert("at 110: alarms + overscale", (ushort)store.ReadRegU(alarmReg), (ushort)(0x07 | 0x10));
+        sim.SetMeasurement(line, det, 100);
+        Assert("at 100: alarms + overscale at boundary", (ushort)store.ReadRegU(alarmReg), (ushort)(0x07 | 0x10));
 
-        sim.SetMeasurement(line, det, 111);
-        Assert("at 111: alarms + OVS+fault+OOR", (ushort)store.ReadRegU(alarmReg), (ushort)(0x07 | 0x10 | 0x20 | 0x40));
+        sim.SetMeasurement(line, det, 110);
+        Assert("at 110: alarms + OVS+fault+OOR at boundary", (ushort)store.ReadRegU(alarmReg), (ushort)(0x07 | 0x10 | 0x20 | 0x40));
+
+        sim.SetMeasurement(line, det, -4);
+        Assert("at -4: no underscale", (ushort)store.ReadRegU(alarmReg), (ushort)0x0000);
+
+        sim.SetMeasurement(line, det, -5);
+        Assert("at -5: underscale at boundary", (ushort)store.ReadRegU(alarmReg), (ushort)0x0008);
 
         sim.SetMeasurement(line, det, -10);
         Assert("at -10: underscale only", (ushort)store.ReadRegU(alarmReg), (ushort)0x0008);
