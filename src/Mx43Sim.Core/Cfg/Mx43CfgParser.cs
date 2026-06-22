@@ -270,10 +270,11 @@ public sealed class Mx43CfgParser
         //   - a global 1-based sensor index sensorId = (line-1)*32 + det
         //     (used by COM43 when it has explicitly placed the detector
         //      on a line, e.g. Volvo, Nynäs, Gotland, ppm1), or
-        //   - 0x0100 (256) for direct 4-20 mA channels. In that case
-        //     inputIndex is the 0-based line number and the detector is
-        //     always detector 1 on that line (verified by ppm.cfg and
-        //     the Nynäs screenshots), or
+        //   - 0x0100 (256) for direct 4-20 mA analog channels. In that
+        //     case inputIndex is the 0-based analog channel/line number,
+        //     the display position is detector 1 on that line, and the
+        //     Modbus registers are the analog ranges 2257..2264 and
+        //     2557..2564 (verified by ppm.cfg and the Nynäs screenshots), or
         //   - high ids 225..255, which are still regular global ids
         //     and therefore map to line 8 (225 = L8D1, 226 = L8D2,
         //     ...). This is visible in exports that also carry L8M...
@@ -287,10 +288,13 @@ public sealed class Mx43CfgParser
             {
                 cfg.Sensors[i].Line     = (sid - 1) / 32 + 1;
                 cfg.Sensors[i].Detector = (sid - 1) % 32 + 1;
+                cfg.Sensors[i].AnalogChannel = 0;
             }
             else if (sid == 0x0100)
             {
-                cfg.Sensors[i].Line     = entries[i].InputIndex + 1;
+                int analogChannel = entries[i].InputIndex + 1;
+                cfg.Sensors[i].AnalogChannel = analogChannel;
+                cfg.Sensors[i].Line     = analogChannel;
                 cfg.Sensors[i].Detector = 1;
             }
             // The display name from 0x9A00 is the operator-facing label

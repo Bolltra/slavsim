@@ -39,7 +39,7 @@ public sealed class Mx43Simulator
         foreach (var d in _store.Detectors) d.Config = null;
         foreach (var s in config.Sensors)
         {
-            int idx = (s.Line - 1) * 32 + (s.Detector - 1);
+            int idx = s.Index;
             if (idx >= 0 && idx < _store.Detectors.Length) _store.Detectors[idx].Config = s;
         }
         // Start with a clean measurement at zero and recompute alarms
@@ -66,13 +66,13 @@ public sealed class Mx43Simulator
     /// </summary>
     public void SetMeasurement(int line, int det, short value)
     {
-        int idx = (line - 1) * 32 + (det - 1);
+        int idx = StateIndexFor(line, det);
         if (idx < 0 || idx >= _store.Detectors.Length) return;
         var d = _store.Detectors[idx];
         d.Measurement = value;
         d.ActiveAlarms = ComputeAlarms(d);
-        int mReg = Mx43AddressMap.MeasurementRegFor(line, det);
-        int aReg = Mx43AddressMap.AlarmRegFor(line, det);
+        int mReg = MeasurementRegFor(d);
+        int aReg = AlarmRegFor(d);
         _store.WriteReg(mReg, value);
         _store.WriteRegU(aReg, (ushort)d.ActiveAlarms);
     }
@@ -80,24 +80,46 @@ public sealed class Mx43Simulator
     /// <summary>Override the alarm bits for one detector (e.g. "force alarm").</summary>
     public void SetAlarm(int line, int det, AlarmBits bits)
     {
-        int idx = (line - 1) * 32 + (det - 1);
+        int idx = StateIndexFor(line, det);
         if (idx < 0 || idx >= _store.Detectors.Length) return;
         var d = _store.Detectors[idx];
         d.ActiveAlarms = bits;
-        int reg = Mx43AddressMap.AlarmRegFor(line, det);
+        int reg = AlarmRegFor(d);
         _store.WriteRegU(reg, (ushort)bits);
     }
 
     public short GetMeasurement(int line, int det)
     {
-        int idx = (line - 1) * 32 + (det - 1);
+        int idx = StateIndexFor(line, det);
         return idx < 0 || idx >= _store.Detectors.Length ? (short)0 : _store.Detectors[idx].Measurement;
     }
 
     public AlarmBits GetAlarm(int line, int det)
     {
-        int idx = (line - 1) * 32 + (det - 1);
+        int idx = StateIndexFor(line, det);
         return idx < 0 || idx >= _store.Detectors.Length ? AlarmBits.None : _store.Detectors[idx].ActiveAlarms;
+    }
+
+    private int StateIndexFor(int line, int det)
+    {
+        var sensor = _config?.Sensors.FirstOrDefault(s => s.Line == line && s.Detector == det);
+        return sensor?.Index ?? ((line - 1) * 32 + (det - 1));
+    }
+
+    private static int MeasurementRegFor(DetectorState d)
+    {
+        if (d.Config is { IsAnalog: true } sensor) return Mx43AddressMap.MeasurementRegFor(sensor);
+        return d.IsAnalog
+            ? Mx43AddressMap.AnalogMeasurementRegFor(d.Detector - 32)
+            : Mx43AddressMap.MeasurementRegFor(d.Line, d.Detector);
+    }
+
+    private static int AlarmRegFor(DetectorState d)
+    {
+        if (d.Config is { IsAnalog: true } sensor) return Mx43AddressMap.AlarmRegFor(sensor);
+        return d.IsAnalog
+            ? Mx43AddressMap.AnalogAlarmRegFor(d.Detector - 32)
+            : Mx43AddressMap.AlarmRegFor(d.Line, d.Detector);
     }
 
     /// <summary>

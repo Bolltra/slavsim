@@ -73,6 +73,7 @@ public sealed class MainForm : Form
         _grid.Columns.Add("addr", "Mät-adress");
         _grid.Columns.Add("line", "Line");
         _grid.Columns.Add("det", "Det");
+        _grid.Columns.Add("kind", "Typ");
         _grid.Columns.Add("label", "Label");
         _grid.Columns.Add("gas", "Gas");
         _grid.Columns.Add("unit", "Enhet");
@@ -230,7 +231,7 @@ public sealed class MainForm : Form
         short v = (short)_numMeas.Value;
         _sim.SetMeasurement(line, det, v);
         // Refresh the grid row + the right-pane summary
-        var d = _sim.Store.Detectors[(line - 1) * 32 + (det - 1)];
+        var d = _sim.Store.Detectors[s.Index];
         row.Cells["meas"].Value = d.Measurement;
         row.Cells["alarms"].Value = d.ActiveAlarms.ToString();
         row.DefaultCellStyle.BackColor = d.ActiveAlarms == AlarmBits.None ? Color.Empty : Color.MistyRose;
@@ -265,9 +266,10 @@ public sealed class MainForm : Form
         try
         {
             var d = _sim.Store.Detectors[s.Index];
-            row.Cells["addr"].Value = Mx43AddressMap.MeasurementRegFor(s.Line, s.Detector);
+            row.Cells["addr"].Value = Mx43AddressMap.MeasurementRegFor(s);
             row.Cells["line"].Value = s.Line;
             row.Cells["det"].Value = s.Detector;
+            row.Cells["kind"].Value = s.IsAnalog ? "Analog" : "Digital";
             row.Cells["label"].Value = s.Label;
             row.Cells["gas"].Value = s.ShortGasName;
             row.Cells["unit"].Value = s.Unit;
@@ -349,6 +351,25 @@ public sealed class MainForm : Form
         if (column == "addr") return;
 
         string text = Convert.ToString(e.FormattedValue)?.Trim() ?? "";
+        if (column == "kind")
+        {
+            if (!TryParseSensorKind(text, out bool targetAnalog))
+            {
+                RejectGridEdit(e, "Typ måste vara Analog eller Digital.");
+                return;
+            }
+            var row = _grid.Rows[e.RowIndex];
+            var sensor = row.Tag as Sensor;
+            if (sensor is not null)
+            {
+                int newLine = ReadIntCell(row, "line", sensor.Line);
+                int newDet = targetAnalog ? 1 : ReadIntCell(row, "det", sensor.Detector);
+                bool duplicate = _config?.Sensors.Any(s => !ReferenceEquals(s, sensor) && s.Line == newLine && s.Detector == newDet) == true;
+                if (duplicate) RejectGridEdit(e, $"L{newLine}D{newDet} används redan av en annan kanal.");
+            }
+            return;
+        }
+
         if (column == "alarms")
         {
             if (!TryParseAlarmBits(text, out _)) RejectGridEdit(e, "Aktiva larm måste vara t.ex. None, Inst1, Inst1, Inst2 eller 0x0008.");
@@ -377,8 +398,14 @@ public sealed class MainForm : Form
             var row = _grid.Rows[e.RowIndex];
             var sensor = row.Tag as Sensor;
             if (sensor is null) return;
+            bool targetAnalog = TryParseSensorKind(ReadTextCell(row, "kind"), out bool parsedAnalog) ? parsedAnalog : sensor.IsAnalog;
             int newLine = column == "line" ? value : ReadIntCell(row, "line", sensor.Line);
-            int newDet = column == "det" ? value : ReadIntCell(row, "det", sensor.Detector);
+            int newDet = targetAnalog ? 1 : (column == "det" ? value : ReadIntCell(row, "det", sensor.Detector));
+            if (targetAnalog && column == "det" && value != 1)
+            {
+                RejectGridEdit(e, "Analoga kanaler använder alltid Det=1.");
+                return;
+            }
             bool duplicate = _config?.Sensors.Any(s => !ReferenceEquals(s, sensor) && s.Line == newLine && s.Detector == newDet) == true;
             if (duplicate) RejectGridEdit(e, $"L{newLine}D{newDet} används redan av en annan kanal.");
         }
@@ -419,7 +446,11 @@ public sealed class MainForm : Form
         {
             case "line":
             case "det":
-                RebindSensor(s, ReadIntCell(row, "line", s.Line), ReadIntCell(row, "det", s.Detector));
+                RebindSensor(s, ReadIntCell(row, "line", s.Line), ReadIntCell(row, "det", s.Detector), s.IsAnalog);
+                break;
+            case "kind":
+                if (TryParseSensorKind(ReadTextCell(row, "kind"), out bool analog))
+                    RebindSensor(s, ReadIntCell(row, "line", s.Line), ReadIntCell(row, "det", s.Detector), analog);
                 break;
             case "label":
                 s.Label = ReadTextCell(row, "label");
@@ -469,9 +500,10 @@ public sealed class MainForm : Form
         }
     }
 
-    private void RebindSensor(Sensor s, int newLine, int newDetector)
+    private void RebindSensor(Sensor s, int newLine, int newDetector, bool analog)
     {
-        if (s.Line == newLine && s.Detector == newDetector) return;
+        newDetector = analog ? 1 : newDetector;
+        if (s.Line == newLine && s.Detector == newDetector && s.IsAnalog == analog) return;
         int oldIndex = s.Index;
         short measurement = _sim.GetMeasurement(s.Line, s.Detector);
         AlarmBits alarms = _sim.GetAlarm(s.Line, s.Detector);
@@ -486,6 +518,7 @@ public sealed class MainForm : Form
 
         s.Line = newLine;
         s.Detector = newDetector;
+        s.AnalogChannel = analog ? newLine : 0;
         int newIndex = s.Index;
         var newState = _sim.Store.Detectors[newIndex];
         newState.Config = s;
@@ -508,6 +541,23 @@ public sealed class MainForm : Form
 
     private static bool IsIntegerColumn(string column)
         => column is "line" or "det" or "range" or "format" or "inst1" or "inst2" or "inst3" or "under" or "over" or "oor" or "meas";
+
+    private static bool TryParseSensorKind(string text, out bool analog)
+    {
+        text = text.Trim();
+        if (text.Equals("Analog", StringComparison.OrdinalIgnoreCase) || text.Equals("A", StringComparison.OrdinalIgnoreCase))
+        {
+            analog = true;
+            return true;
+        }
+        if (text.Equals("Digital", StringComparison.OrdinalIgnoreCase) || text.Equals("D", StringComparison.OrdinalIgnoreCase))
+        {
+            analog = false;
+            return true;
+        }
+        analog = false;
+        return false;
+    }
 
     private static bool TryParseAlarmBits(string text, out AlarmBits bits)
     {

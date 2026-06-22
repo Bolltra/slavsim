@@ -71,8 +71,11 @@ public sealed class Sensor
     public int Line { get; set; }
     /// <summary>Detector number within line 1..32.</summary>
     public int Detector { get; set; }
+    /// <summary>Analog channel number 1..8 for direct 4-20 mA inputs, or 0 for digital line detectors.</summary>
+    public int AnalogChannel { get; set; }
+    public bool IsAnalog => AnalogChannel is >= 1 and <= 8;
     /// <summary>0-based index across the full 256+8 range (0..255 for digital, 256..263 for analog).</summary>
-    public int Index => (Line - 1) * 32 + (Detector - 1);
+    public int Index => IsAnalog ? 256 + (AnalogChannel - 1) : (Line - 1) * 32 + (Detector - 1);
 
     public string Label { get; set; } = "";
     public string Unit { get; set; } = "";

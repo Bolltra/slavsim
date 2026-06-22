@@ -272,7 +272,7 @@ internal static class Program
         sim.Load(cfg, null);
 
         int line = s.Line, det = s.Detector;
-        int alarmReg = Mx43AddressMap.AlarmRegFor(line, det);
+        int alarmReg = Mx43AddressMap.AlarmRegFor(s);
 
         sim.SetMeasurement(line, det, 0);
         Assert("at 0: no alarm", (ushort)store.ReadRegU(alarmReg), (ushort)0);
@@ -337,7 +337,7 @@ internal static class Program
             using var client = new TcpClient();
             client.Connect("127.0.0.1", port);
             using var s = client.GetStream();
-            int startReg = Mx43AddressMap.MeasurementRegFor(s0.Line, s0.Detector);
+            int startReg = Mx43AddressMap.MeasurementRegFor(s0);
             var req = new byte[] {
                 0, 1, 0, 0, 0, 6, 1,
                 3, (byte)(startReg >> 8), (byte)(startReg & 0xFF), 0, 4,
@@ -395,11 +395,14 @@ internal static class Program
         Assert("line 2 det 15 is Ugn 1-3 H2", line2[14].Label, "Ugn 1-3 H2");
 
         // Verify that the Modbus measurement addresses line up with
-        // the address-map formula: 2000 + (line-1)*32 + det.
+        // the address-map formula. Digital detectors use 2001..2256;
+        // direct 4-20 mA channels use the analog range 2257..2264.
         foreach (var s in cfg.Sensors)
         {
-            int expected = 2000 + (s.Line - 1) * 32 + s.Detector;
-            int actual = Mx43AddressMap.MeasurementRegFor(s.Line, s.Detector);
+            int expected = s.IsAnalog
+                ? 2256 + s.AnalogChannel
+                : 2000 + (s.Line - 1) * 32 + s.Detector;
+            int actual = Mx43AddressMap.MeasurementRegFor(s);
             Assert($"L{s.Line}D{s.Detector} measurement reg = {expected}", actual, expected);
         }
 
@@ -415,6 +418,8 @@ internal static class Program
             Assert("Nynas line 2 count", nynas.Sensors.Count(s => s.Line == 2), 2);
             Assert("Nynas line 3 direct 4-20", nynas.Sensors.Count(s => s.Line == 3 && s.Detector == 1), 1);
             Assert("Nynas line 4 direct 4-20", nynas.Sensors.Count(s => s.Line == 4 && s.Detector == 1), 1);
+            Assert("Nynas line 3 analog measurement", Mx43AddressMap.MeasurementRegFor(nynas.Sensors.Single(s => s.Line == 3 && s.Detector == 1)), 2259);
+            Assert("Nynas line 4 analog measurement", Mx43AddressMap.MeasurementRegFor(nynas.Sensors.Single(s => s.Line == 4 && s.Detector == 1)), 2260);
         }
 
         var ppmPath = Directory.Exists(fixturesDir)
@@ -425,7 +430,20 @@ internal static class Program
             var ppm = new Mx43CfgParser(ppmPath).Parse();
             Assert("ppm detector count", ppm.Sensors.Count, 6);
             for (int lineNo = 1; lineNo <= 6; lineNo++)
+            {
                 Assert($"ppm line {lineNo} direct 4-20", ppm.Sensors.Count(s => s.Line == lineNo && s.Detector == 1), 1);
+                var analogSensor = ppm.Sensors.Single(s => s.Line == lineNo && s.Detector == 1);
+                Assert($"ppm line {lineNo} is analog", analogSensor.IsAnalog, true);
+                Assert($"ppm line {lineNo} analog measurement", Mx43AddressMap.MeasurementRegFor(analogSensor), 2256 + lineNo);
+                Assert($"ppm line {lineNo} analog alarm", Mx43AddressMap.AlarmRegFor(analogSensor), 2556 + lineNo);
+            }
+
+            var store = new Mx43RegisterStore();
+            var sim = new Mx43Simulator(store);
+            sim.Load(ppm, null);
+            sim.SetMeasurement(1, 1, 42);
+            Assert("ppm analog L1D1 writes reg 2257", store.ReadReg(Mx43AddressMap.AnalogMeasurementRegFor(1)), (short)42);
+            Assert("ppm analog L1D1 does not write digital reg 2001", store.ReadReg(Mx43AddressMap.MeasurementRegFor(1, 1)), (short)0);
         }
 
         var polypeptidePath = Directory.Exists(fixturesDir)
@@ -437,7 +455,10 @@ internal static class Program
             var polypeptide = new Mx43CfgParser(polypeptidePath).Parse();
             Assert("Polypeptide detector count", polypeptide.Sensors.Count, 16);
             for (int lineNo = 1; lineNo <= 7; lineNo++)
+            {
                 Assert($"Polypeptide line {lineNo} direct 4-20", polypeptide.Sensors.Count(s => s.Line == lineNo && s.Detector == 1), 1);
+                Assert($"Polypeptide line {lineNo} analog measurement", Mx43AddressMap.MeasurementRegFor(polypeptide.Sensors.Single(s => s.Line == lineNo && s.Detector == 1)), 2256 + lineNo);
+            }
             Assert("Polypeptide line 8 count", polypeptide.Sensors.Count(s => s.Line == 8), 9);
             Assert("Polypeptide line 8 detector 1", polypeptide.Sensors.Count(s => s.Line == 8 && s.Detector == 1), 1);
             Assert("Polypeptide line 8 detector 8", polypeptide.Sensors.Count(s => s.Line == 8 && s.Detector == 8), 1);
@@ -453,7 +474,10 @@ internal static class Program
             var b062 = new Mx43CfgParser(b062Path).Parse();
             Assert("B062 detector count", b062.Sensors.Count, 16);
             for (int lineNo = 1; lineNo <= 7; lineNo++)
+            {
                 Assert($"B062 line {lineNo} direct 4-20", b062.Sensors.Count(s => s.Line == lineNo && s.Detector == 1), 1);
+                Assert($"B062 line {lineNo} analog measurement", Mx43AddressMap.MeasurementRegFor(b062.Sensors.Single(s => s.Line == lineNo && s.Detector == 1)), 2256 + lineNo);
+            }
             Assert("B062 line 8 count", b062.Sensors.Count(s => s.Line == 8), 9);
             Assert("B062 line 8 detector 2", b062.Sensors.Count(s => s.Line == 8 && s.Detector == 2), 1);
             Assert("B062 line 8 detector 10", b062.Sensors.Count(s => s.Line == 8 && s.Detector == 10), 1);
@@ -499,7 +523,7 @@ internal static class Program
             {
                 Console.WriteLine($"  Line {line}: {sensors.Count} detectors");
                 foreach (var s in sensors)
-                    Console.WriteLine($"    L{s.Line}D{s.Detector,2} reg={Mx43AddressMap.MeasurementRegFor(s.Line, s.Detector)} '{s.Label}' [{s.ShortGasName}]");
+                    Console.WriteLine($"    L{s.Line}D{s.Detector,2} {(s.IsAnalog ? "analog" : "digital"),7} reg={Mx43AddressMap.MeasurementRegFor(s)} '{s.Label}' [{s.ShortGasName}]");
             }
 
             // Verify detector numbers are unique and within 1..32 per line.
@@ -520,7 +544,7 @@ internal static class Program
 
             // Verify the measurement addresses are unique and ascending.
             var addrs = cfg.Sensors
-                .Select(s => Mx43AddressMap.MeasurementRegFor(s.Line, s.Detector))
+                .Select(Mx43AddressMap.MeasurementRegFor)
                 .ToList();
             if (addrs.Count != addrs.Distinct().Count())
             {

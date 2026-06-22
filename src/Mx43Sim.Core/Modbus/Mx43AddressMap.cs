@@ -1,3 +1,5 @@
+using Mx43Sim.Core.Domain;
+
 namespace Mx43Sim.Core.Modbus;
 
 /// <summary>
@@ -85,15 +87,24 @@ public static class Mx43AddressMap
 
     public static int AnalogConfigBaseFor(int channel) => AnalogConfigBase + (channel - 1);
 
+    public static int ConfigBaseFor(Sensor sensor)
+        => sensor.IsAnalog ? AnalogConfigBaseFor(sensor.AnalogChannel) : ConfigBaseFor(sensor.Line, sensor.Detector);
+
     public static int MeasurementRegFor(int line, int detector)
         => MeasurementBase + (line - 1) * DetectorsPerLine + (detector - 1);
 
     public static int AnalogMeasurementRegFor(int channel) => AnalogMeasurementBase + (channel - 1);
 
+    public static int MeasurementRegFor(Sensor sensor)
+        => sensor.IsAnalog ? AnalogMeasurementRegFor(sensor.AnalogChannel) : MeasurementRegFor(sensor.Line, sensor.Detector);
+
     public static int AlarmRegFor(int line, int detector)
         => AlarmBase + (line - 1) * DetectorsPerLine + (detector - 1);
 
     public static int AnalogAlarmRegFor(int channel) => AnalogAlarmBase + (channel - 1);
+
+    public static int AlarmRegFor(Sensor sensor)
+        => sensor.IsAnalog ? AnalogAlarmRegFor(sensor.AnalogChannel) : AlarmRegFor(sensor.Line, sensor.Detector);
 
     /// <summary>Inverse: configuration request address -> (line, detector) or null for analog/other.</summary>
     public static (int Line, int Detector)? DetectorFromConfigBase(int baseReg)
