@@ -5,10 +5,9 @@ namespace Mx43Sim.Core.Modbus;
 
 /// <summary>
 /// Per-alarm bit positions inside the alarm word at address 2301+offset
-/// (or 2557..2564 for analog). The cahier says the word contains
-/// 'bit0..bit5' for the 6 alarm types (rising/falling) but the convention
-/// from the G15 .cfg has values 7, 22, 63 (0x07, 0x16, 0x3F) which look
-/// like the bits for *enabled* alarm 1/2/3. We expose both representations.
+/// (or 2557..2564 for analog). The MX43 cahier defines three alarm bits
+/// followed by scale/fault bits; averaged alarms are reported through the
+/// same Alarm 1/2/3 bits as instantaneous alarms.
 /// </summary>
 [Flags]
 public enum AlarmBits : ushort
@@ -17,17 +16,16 @@ public enum AlarmBits : ushort
     Inst1       = 1 << 0,
     Inst2       = 1 << 1,
     Inst3       = 1 << 2,
-    Avg1        = 1 << 3,
-    Avg2        = 1 << 4,
-    Avg3        = 1 << 5,
-    /// <summary>Bit 6 used in some firmware revisions - underscale.</summary>
-    Underscale  = 1 << 6,
-    /// <summary>Bit 7 - overscale.</summary>
-    Overscale   = 1 << 7,
-    /// <summary>Bit 8 - fault.</summary>
-    Fault       = 1 << 8,
-    /// <summary>Bit 9 - out of range.</summary>
-    OutOfRange  = 1 << 9,
+    /// <summary>Bit 3 - underscale.</summary>
+    Underscale  = 1 << 3,
+    /// <summary>Bit 4 - overscale.</summary>
+    Overscale   = 1 << 4,
+    /// <summary>Bit 5 - fault.</summary>
+    Fault       = 1 << 5,
+    /// <summary>Bit 6 - out of range.</summary>
+    OutOfRange  = 1 << 6,
+    /// <summary>Bit 7 - non-ambiguity reading.</summary>
+    NonAmbiguityReading = 1 << 7,
 }
 
 /// <summary>

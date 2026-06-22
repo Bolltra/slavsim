@@ -188,10 +188,10 @@ public sealed class Mx43ModbusServer : IAsyncDisposable
 
         var payload = new byte[1 + qty * 2];
         payload[0] = (byte)(qty * 2);
+        var regs = _store.ReadRange(start, qty);
         for (int i = 0; i < qty; i++)
         {
-            int addr = start + i;     // 1-based addressing
-            short v = _store.ReadReg(addr);
+            short v = regs[i];
             BinaryPrimitives.WriteUInt16BigEndian(payload.AsSpan(1 + i * 2, 2), (ushort)v);
         }
         var resp = new byte[2 + payload.Length];

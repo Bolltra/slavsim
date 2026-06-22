@@ -87,16 +87,14 @@ Relay state is **not** exposed on the Modbus wire — slave displays do not show
 
 | Bit | Meaning |
 |---|---|
-| 0 | Instantaneous Alarm 1 |
-| 1 | Instantaneous Alarm 2 |
-| 2 | Instantaneous Alarm 3 |
-| 3 | Average Alarm 1 |
-| 4 | Average Alarm 2 |
-| 5 | Average Alarm 3 |
-| 6 | Underscale |
-| 7 | Overscale |
-| 8 | Fault |
-| 9 | Out of range |
+| 0 | Alarm 1 |
+| 1 | Alarm 2 |
+| 2 | Alarm 3 |
+| 3 | Underscale |
+| 4 | Overscale |
+| 5 | Fault |
+| 6 | Out of range |
+| 7 | Non-ambiguity reading |
 
 ## Address map regeneration
 

@@ -58,6 +58,7 @@ internal static class Program
             TestAddressListParser();
             TestSelfUpdater();
             TestRegisterStore();
+            TestConfigVirtualRead();
             TestModbusServer();
             TestSimulator();
             TestEndToEnd();
@@ -81,6 +82,8 @@ internal static class Program
         Assert("measurement line 2 det 1 = 2033", list.MeasurementAddr[1, 0], 2033);
         Assert("alarm line 1 det 1 = 2301", list.AlarmAddr[0, 0], 2301);
         Assert("config line 1 det 1 = 1", list.ConfigAddr[0, 0], 1);
+        Assert("config line 1 det 2 = 2", Mx43AddressMap.ConfigBaseFor(1, 2), 2);
+        Assert("config line 2 det 1 = 33", Mx43AddressMap.ConfigBaseFor(2, 1), 33);
         Assert("analog measurement 1 = 2257", list.AnalogMeasurementAddr[0], 2257);
         return 0;
     }
@@ -165,6 +168,62 @@ internal static class Program
         return 0;
     }
 
+    private static int TestConfigVirtualRead()
+    {
+        var cfg = new Mx43Config();
+        cfg.Sensors.Add(new Sensor
+        {
+            Line = 1,
+            Detector = 1,
+            Label = "Ammoniak",
+            Unit = "ppm",
+            ShortGasName = "NH3",
+            Range = 1000,
+            DisplayFormat = 0,
+            BarLed = 8,
+            Thresholds = new AlarmThresholds { Inst1 = 20, Inst2 = 30, Inst3 = 50, Underscale = -5, Overscale = 100, OutOfRange = 110 },
+            EnableFlags = AlarmEnable.Inst1 | AlarmEnable.Inst2 | AlarmEnable.Inst3,
+        });
+        cfg.Sensors.Add(new Sensor
+        {
+            Line = 1,
+            Detector = 2,
+            Label = "Kanal 2",
+            Unit = "%LEL",
+            ShortGasName = "CH4",
+            Range = 100,
+            DisplayFormat = 0,
+            BarLed = 8,
+            Thresholds = new AlarmThresholds { Inst1 = 10, Inst2 = 20, Inst3 = 30, Underscale = -5, Overscale = 100, OutOfRange = 110 },
+            EnableFlags = AlarmEnable.Inst1 | AlarmEnable.Inst2 | AlarmEnable.Inst3,
+        });
+
+        var store = new Mx43RegisterStore();
+        var sim = new Mx43Simulator(store);
+        sim.Load(cfg, null);
+
+        var block1 = store.ReadRange(Mx43AddressMap.ConfigBaseFor(1, 1), Mx43AddressMap.ConfigBlockSize);
+        var block2 = store.ReadRange(Mx43AddressMap.ConfigBaseFor(1, 2), Mx43AddressMap.ConfigBlockSize);
+
+        Assert("config L1D1 label", DecodeUtf16(block1, 0, 16), "Ammoniak");
+        Assert("config L1D2 label", DecodeUtf16(block2, 0, 16), "Kanal 2");
+        Assert("config L1D2 status", (ushort)block2[16], (ushort)1);
+        Assert("config L1D2 range", (ushort)block2[37], (ushort)100);
+        Assert("config L1D2 unit", DecodeUtf16(block2, 39, 5), "%LEL");
+        Assert("config L1D2 short gas", DecodeUtf16(block2, 44, 6), "CH4");
+        Assert("config L1D2 Inst1", block2[51], (short)10);
+
+        var server = new Mx43ModbusServer(store, 0);
+        var fc3 = server.GetType()
+            .GetMethod("HandleRequest", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .Invoke(server, new object?[] { (byte)1, (byte)3, new byte[] { 3, 0x00, 0x02, 0x00, 0x10 } });
+        var arr = (byte[])fc3!;
+        Assert("FC3 config echo", arr[0], (byte)3);
+        Assert("FC3 config byte count", arr[1], (byte)32);
+        Assert("FC3 config L1D2 label", DecodeUtf16Response(arr, 2, 16), "Kanal 2");
+        return 0;
+    }
+
     private static int TestModbusServer()
     {
         var store = new Mx43RegisterStore();
@@ -202,6 +261,11 @@ internal static class Program
         Assert("CH4 sensor Overscale=100", s.Thresholds.Overscale, 100);
         Assert("CH4 sensor OutOfRange=110",s.Thresholds.OutOfRange, 110);
         Assert("CH4 sensor enable=0x07",   (ushort)s.EnableFlags, (ushort)0x07);
+        Assert("alarm bit Inst3=0x0004",   (ushort)AlarmBits.Inst3, (ushort)0x0004);
+        Assert("alarm bit UDS=0x0008",     (ushort)AlarmBits.Underscale, (ushort)0x0008);
+        Assert("alarm bit OVS=0x0010",     (ushort)AlarmBits.Overscale, (ushort)0x0010);
+        Assert("alarm bit fault=0x0020",   (ushort)AlarmBits.Fault, (ushort)0x0020);
+        Assert("alarm bit OOR=0x0040",     (ushort)AlarmBits.OutOfRange, (ushort)0x0040);
 
         var store = new Mx43RegisterStore();
         var sim = new Mx43Simulator(store);
@@ -226,10 +290,13 @@ internal static class Program
         Assert("at 50: Inst1+2+3", (ushort)store.ReadRegU(alarmReg), (ushort)0x0007);
 
         sim.SetMeasurement(line, det, 110);
-        Assert("at 110: alarms + overscale", (ushort)store.ReadRegU(alarmReg), (ushort)(0x07 | 0x80));
+        Assert("at 110: alarms + overscale", (ushort)store.ReadRegU(alarmReg), (ushort)(0x07 | 0x10));
+
+        sim.SetMeasurement(line, det, 111);
+        Assert("at 111: alarms + OVS+fault+OOR", (ushort)store.ReadRegU(alarmReg), (ushort)(0x07 | 0x10 | 0x20 | 0x40));
 
         sim.SetMeasurement(line, det, -10);
-        Assert("at -10: underscale only", (ushort)store.ReadRegU(alarmReg), (ushort)0x0040);
+        Assert("at -10: underscale only", (ushort)store.ReadRegU(alarmReg), (ushort)0x0008);
 
         sim.SetMeasurement(line, det, 0);
         Assert("back to 0: no alarm", (ushort)store.ReadRegU(alarmReg), (ushort)0);
@@ -459,6 +526,31 @@ internal static class Program
     }
 
     private static int _failCount = 0;
+
+    private static string DecodeUtf16(short[] regs, int offset, int registerCount)
+    {
+        var chars = new List<char>();
+        for (int i = 0; i < registerCount && offset + i < regs.Length; i++)
+        {
+            ushort v = (ushort)regs[offset + i];
+            if (v == 0) break;
+            chars.Add((char)v);
+        }
+        return new string(chars.ToArray());
+    }
+
+    private static string DecodeUtf16Response(byte[] bytes, int offset, int registerCount)
+    {
+        var chars = new List<char>();
+        for (int i = 0; i < registerCount && offset + i * 2 + 1 < bytes.Length; i++)
+        {
+            ushort v = (ushort)((bytes[offset + i * 2] << 8) | bytes[offset + i * 2 + 1]);
+            if (v == 0) break;
+            chars.Add((char)v);
+        }
+        return new string(chars.ToArray());
+    }
+
     private static void Assert<T>(string name, T actual, T expected)
     {
         if (Equals(actual, expected))

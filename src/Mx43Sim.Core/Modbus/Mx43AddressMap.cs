@@ -5,15 +5,16 @@ namespace Mx43Sim.Core.Modbus;
 /// (cahier des charges supervision_MX43_v2 GB).
 ///
 /// Layout (all addresses are holding-register / 16-bit Modbus addresses):
-///   1..256       DETECTORS CONFIGURATION   (8 lines x 32 detectors)
-///   257..264     Analog channels 1..8      (mirrored into 2257..2264)
+///   1..256       DETECTORS CONFIGURATION request addresses (8 x 32)
+///   257..264     Analog channel configuration request addresses
 ///   2001..2256   Detector measurement      (signed, 1 per detector, line-major)
 ///   2257..2264   Analog channel measurement
 ///   2301..2556   Activated alarms          (bit-packed, 1 per detector)
 ///   2557..2564   Analog channel alarms
 ///   2600..2603   INFO (CRC32, second counter)
 ///
-/// Within a DETECTORS CONFIGURATION block (16-bit registers, base = line * 32 - 31):
+/// Reading one DETECTORS CONFIGURATION request address returns a virtual
+/// 68-register block for that detector. Within that block:
 ///   +0   DETECTOR LABEL             (2 x 16 wchar = 16 registers)
 ///   +16  STATUS                      (1 register)
 ///   +17  Gas name                    (2 x 20 wchar = 20 registers)
@@ -49,7 +50,7 @@ public static class Mx43AddressMap
     public const int AnalogChannels = 8;
     public const int TotalDetectors = Lines * DetectorsPerLine; // 256
 
-    public const int ConfigBlockSize = 68; // registers per detector
+    public const int ConfigBlockSize = 68; // registers returned per detector configuration request
 
     // Configuration registers
     public const int ConfigBase = 1;             // 1..256
@@ -78,9 +79,9 @@ public static class Mx43AddressMap
     public const int InfoCounterMsw  = 2602;
     public const int InfoCounterLsw  = 2603;
 
-    /// <summary>Map (line, detector) to a configuration-register base (label register).</summary>
+    /// <summary>Map (line, detector) to the configuration request address.</summary>
     public static int ConfigBaseFor(int line, int detector)
-        => ConfigBase + (line - 1) * DetectorsPerLine + (detector - 1) * ConfigBlockSize;
+        => ConfigBase + (line - 1) * DetectorsPerLine + (detector - 1);
 
     public static int AnalogConfigBaseFor(int channel) => AnalogConfigBase + (channel - 1);
 
@@ -94,16 +95,13 @@ public static class Mx43AddressMap
 
     public static int AnalogAlarmRegFor(int channel) => AnalogAlarmBase + (channel - 1);
 
-    /// <summary>Inverse: configuration-register base -> (line, detector) or null for analog/other.</summary>
+    /// <summary>Inverse: configuration request address -> (line, detector) or null for analog/other.</summary>
     public static (int Line, int Detector)? DetectorFromConfigBase(int baseReg)
     {
         if (baseReg < ConfigBase || baseReg > ConfigEnd) return null;
         int offset = baseReg - ConfigBase;
-        int line = (offset / ConfigBlockSize) + 1;
-        int det  = (offset % ConfigBlockSize) / ConfigBlockSize + 1;
-        // ConfigBlockSize is 68 — but each detector uses exactly 68 registers, so the inner modulo
-        // collapses to 0..67. Detector number = (offset / ConfigBlockSize) + 1.
-        det = (offset / ConfigBlockSize) + 1;
+        int line = (offset / DetectorsPerLine) + 1;
+        int det  = (offset % DetectorsPerLine) + 1;
         return (line, det);
     }
 }

@@ -330,7 +330,7 @@ public sealed class Mx43CfgParser
             {
                 ushort v = (ushort)(_data[off + j] | (_data[off + j + 1] << 8));
                 if (v == 0) { j += 2; break; }
-                sb.Append(32 <= v && v <= 126 ? (char)v : '?');
+                sb.Append(char.IsControl((char)v) ? '?' : (char)v);
                 j += 2;
             }
             if (j == 6)

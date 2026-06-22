@@ -103,7 +103,7 @@ public sealed class Mx43Simulator
     /// <summary>
     /// Derive the active alarm bits from the configured thresholds.
     /// MX43 semantics:
-    ///   - Inst1, Inst2, Inst3 latch when |value| crosses the threshold
+    ///   - Alarm 1/2/3 latch when |value| crosses the instantaneous or averaged threshold
     ///   - Underscale / Overscale latch when value falls outside
     ///   - OutOfRange latches when value exceeds OutOfRange threshold
     ///   - Fault latches together with OutOfRange
@@ -119,9 +119,9 @@ public sealed class Mx43Simulator
         if (c.Thresholds.Inst1 != 0 && System.Math.Abs(v) >= c.Thresholds.Inst1) b |= AlarmBits.Inst1;
         if (c.Thresholds.Inst2 != 0 && System.Math.Abs(v) >= c.Thresholds.Inst2) b |= AlarmBits.Inst2;
         if (c.Thresholds.Inst3 != 0 && System.Math.Abs(v) >= c.Thresholds.Inst3) b |= AlarmBits.Inst3;
-        if (c.Thresholds.Avg1  != 0 && System.Math.Abs(v) >= c.Thresholds.Avg1)  b |= AlarmBits.Avg1;
-        if (c.Thresholds.Avg2  != 0 && System.Math.Abs(v) >= c.Thresholds.Avg2)  b |= AlarmBits.Avg2;
-        if (c.Thresholds.Avg3  != 0 && System.Math.Abs(v) >= c.Thresholds.Avg3)  b |= AlarmBits.Avg3;
+        if (c.Thresholds.Avg1  != 0 && System.Math.Abs(v) >= c.Thresholds.Avg1)  b |= AlarmBits.Inst1;
+        if (c.Thresholds.Avg2  != 0 && System.Math.Abs(v) >= c.Thresholds.Avg2)  b |= AlarmBits.Inst2;
+        if (c.Thresholds.Avg3  != 0 && System.Math.Abs(v) >= c.Thresholds.Avg3)  b |= AlarmBits.Inst3;
 
         if (c.Thresholds.Underscale != 0 && v < c.Thresholds.Underscale) b |= AlarmBits.Underscale;
         if (c.Thresholds.Overscale  != 0 && v > c.Thresholds.Overscale)  b |= AlarmBits.Overscale;
@@ -131,18 +131,14 @@ public sealed class Mx43Simulator
             b |= AlarmBits.Fault;
         }
 
-        // Mask by enable flags. If the .cfg has 0x07 set (typical for
-        // a configured channel) we keep Inst1/2/3. We also keep the
-        // scale/Fault bits unconditionally — they should always be
-        // visible to the slave.
+        // Mask by enable flags. The active-alarm register only has
+        // Alarm1/2/3 bits; averaged alarms use the same output bits as
+        // their instantaneous counterparts.
         var allowed = c.EnableFlags;
         AlarmBits enabled = AlarmBits.None;
-        if ((allowed & AlarmEnable.Inst1) != 0) enabled |= AlarmBits.Inst1;
-        if ((allowed & AlarmEnable.Inst2) != 0) enabled |= AlarmBits.Inst2;
-        if ((allowed & AlarmEnable.Inst3) != 0) enabled |= AlarmBits.Inst3;
-        if ((allowed & AlarmEnable.Avg1)  != 0) enabled |= AlarmBits.Avg1;
-        if ((allowed & AlarmEnable.Avg2)  != 0) enabled |= AlarmBits.Avg2;
-        if ((allowed & AlarmEnable.Avg3)  != 0) enabled |= AlarmBits.Avg3;
+        if ((allowed & (AlarmEnable.Inst1 | AlarmEnable.Avg1)) != 0) enabled |= AlarmBits.Inst1;
+        if ((allowed & (AlarmEnable.Inst2 | AlarmEnable.Avg2)) != 0) enabled |= AlarmBits.Inst2;
+        if ((allowed & (AlarmEnable.Inst3 | AlarmEnable.Avg3)) != 0) enabled |= AlarmBits.Inst3;
         b = (b & enabled) | (b & (AlarmBits.Underscale | AlarmBits.Overscale | AlarmBits.Fault | AlarmBits.OutOfRange));
         return b;
     }

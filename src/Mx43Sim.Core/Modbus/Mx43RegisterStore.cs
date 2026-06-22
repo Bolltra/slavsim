@@ -80,6 +80,8 @@ public sealed class Mx43RegisterStore
         var result = new short[count];
         lock (_lock)
         {
+            if (TryReadConfigRangeLocked(start, result)) return result;
+
             for (int i = 0; i < count; i++)
             {
                 int addr = start + i;
@@ -118,18 +120,10 @@ public sealed class Mx43RegisterStore
 
     private void PackOne(DetectorState d)
     {
-        // The Mx43 adresslista.xlsx says there is exactly ONE config
-        // register per detector (1..256). The cahier describes a
-        // theoretical 68-register block but in practice the slave
-        // display reads config as a single 16-bit value (probably a
-        // detector index) and looks up labels/gas/thresholds from
-        // its own internal table. We therefore only write the
-        // measurement and alarm registers, leaving config untouched
-        // so the slave can keep whatever it was configured with.
-        //
-        // If you need to set measurement/alarm live (which is the
-        // whole point of the simulator) those work fine via the
-        // MeasurementReg / AlarmReg registers below.
+        // Measurement/alarm registers are linear. Configuration registers
+        // are virtual request addresses handled by ReadRange(), otherwise
+        // each detector's 68-word text block would spill into the next
+        // detector address and produce shifted names.
         int measurementReg;
         int alarmReg;
         if (d.IsAnalog)
@@ -147,21 +141,74 @@ public sealed class Mx43RegisterStore
         WriteRegU(alarmReg,       (ushort)d.ActiveAlarms);
     }
 
-    private void WriteUtf16(int startReg, string text, int registerCount)
+    private bool TryReadConfigRangeLocked(int start, short[] result)
     {
-        if (string.IsNullOrEmpty(text)) return;
-        // Truncate or pad with 0 to fit registerCount words.
-        int maxChars = registerCount;
-        for (int i = 0; i < maxChars; i++)
+        int detectorIndex;
+        if (start >= Mx43AddressMap.ConfigBase && start <= Mx43AddressMap.ConfigEnd)
         {
-            int addr = startReg + i;
-            ushort v = 0;
-            if (i < text.Length)
-            {
-                char c = text[i];
-                v = c < 0x10000 ? (ushort)c : (ushort)'?';
-            }
-            WriteRegU(addr, v);
+            detectorIndex = start - Mx43AddressMap.ConfigBase;
+        }
+        else if (start >= Mx43AddressMap.AnalogConfigBase && start <= Mx43AddressMap.AnalogConfigEnd)
+        {
+            detectorIndex = Mx43AddressMap.TotalDetectors + (start - Mx43AddressMap.AnalogConfigBase);
+        }
+        else
+        {
+            return false;
+        }
+
+        if (detectorIndex < 0 || detectorIndex >= _detectors.Length) return true;
+        var d = _detectors[detectorIndex];
+        var c = d.Config;
+        if (c is null) return true;
+
+        WriteUtf16(result, 0,  c.Label,        16);
+        WriteU16  (result, 16, (ushort)(d.Enabled ? 1 : 0));
+        WriteUtf16(result, 17, c.Label,        20);
+        WriteU16  (result, 37, (ushort)c.Range);
+        WriteU16  (result, 38, (ushort)c.DisplayFormat);
+        WriteUtf16(result, 39, c.Unit,         5);
+        WriteUtf16(result, 44, c.ShortGasName, 6);
+        WriteU16  (result, 50, (ushort)c.BarLed);
+        WriteI16  (result, 51, (short)c.Thresholds.Inst1);
+        WriteI16  (result, 52, (short)c.Thresholds.Inst2);
+        WriteI16  (result, 53, (short)c.Thresholds.Inst3);
+        WriteI16  (result, 54, (short)c.Thresholds.Avg1);
+        WriteI16  (result, 55, (short)c.Thresholds.Avg2);
+        WriteI16  (result, 56, (short)c.Thresholds.Avg3);
+        WriteI16  (result, 57, (short)c.Thresholds.Underscale);
+        WriteI16  (result, 58, (short)c.Thresholds.Overscale);
+        WriteI16  (result, 59, (short)c.Thresholds.Fault);
+        WriteI16  (result, 60, (short)c.Thresholds.OutOfRange);
+        WriteU16  (result, 61, (ushort)c.AveragingTime1);
+        WriteU16  (result, 62, (ushort)c.AveragingTime2);
+        WriteU16  (result, 63, (ushort)c.AveragingTime3);
+        WriteU16  (result, 64, (ushort)c.Hysteresis);
+        WriteU16  (result, 65, (ushort)c.EnableFlags);
+        WriteU16  (result, 66, (ushort)c.AckFlags);
+        WriteU16  (result, 67, (ushort)c.EdgeFlags);
+        return true;
+    }
+
+    private static void WriteU16(short[] regs, int offset, ushort value)
+    {
+        if ((uint)offset < (uint)regs.Length) regs[offset] = (short)value;
+    }
+
+    private static void WriteI16(short[] regs, int offset, short value)
+    {
+        if ((uint)offset < (uint)regs.Length) regs[offset] = value;
+    }
+
+    private static void WriteUtf16(short[] regs, int offset, string text, int registerCount)
+    {
+        if (registerCount <= 0 || offset >= regs.Length) return;
+        int maxChars = Math.Min(text?.Length ?? 0, registerCount - 1);
+        for (int i = 0; i < maxChars && offset + i < regs.Length; i++)
+        {
+            char c = text![i];
+            regs[offset + i] = (short)(char.IsControl(c) ? '?' : c);
         }
     }
+
 }
