@@ -2,6 +2,8 @@ using System;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Mx43Sim.Core.Cfg;
@@ -24,6 +26,7 @@ public sealed class MainForm : Form
     private readonly Button _btnStart = new() { Text = "Starta server", Enabled = false };
     private readonly Button _btnStop = new() { Text = "Stoppa server", Enabled = false };
     private readonly NumericUpDown _numPort = new() { Minimum = 1, Maximum = 65535, Value = 502 };
+    private readonly Label _lblIp = new() { Text = "IP: 127.0.0.1", AutoSize = true };
     private readonly Label _lblStatus = new() { Text = "Inget laddat", AutoSize = true };
     private readonly Label _lblPort = new() { Text = "Port:", AutoSize = true };
 
@@ -49,7 +52,7 @@ public sealed class MainForm : Form
         // Top toolbar
         var top = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 50, Padding = new Padding(8) };
         top.Controls.AddRange(new Control[] {
-            _btnLoadCfg, _lblPort, _numPort, _btnStart, _btnStop, _lblStatus
+            _btnLoadCfg, _lblIp, _lblPort, _numPort, _btnStart, _btnStop, _lblStatus
         });
         Controls.Add(top);
 
@@ -241,6 +244,9 @@ public sealed class MainForm : Form
         try
         {
             await _server.StartAsync();
+            var addresses = GetListenAddressText();
+            _lblIp.Text = $"IP: {addresses}";
+            Log($"Server address: {addresses}:{port}");
             _btnStart.Enabled = false;
             _btnStop.Enabled = true;
         }
@@ -254,7 +260,29 @@ public sealed class MainForm : Form
     {
         if (_server is not null) await _server.StopAsync();
         _server = null;
+        _lblIp.Text = "IP: 127.0.0.1";
         _btnStart.Enabled = true;
         _btnStop.Enabled = false;
+    }
+
+    private static string GetListenAddressText()
+    {
+        try
+        {
+            var lanAddresses = Dns.GetHostEntry(Dns.GetHostName()).AddressList
+                .Where(a => a.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a))
+                .Select(a => a.ToString())
+                .Distinct()
+                .OrderBy(a => a)
+                .ToArray();
+
+            return lanAddresses.Length == 0
+                ? "127.0.0.1"
+                : "127.0.0.1, " + string.Join(", ", lanAddresses);
+        }
+        catch
+        {
+            return "127.0.0.1";
+        }
     }
 }
