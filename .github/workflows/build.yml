@@ -22,6 +22,9 @@ jobs:
       - name: Build Core
         run: dotnet build src/Mx43Sim.Core/Mx43Sim.Core.csproj -c Release --nologo
 
+      - name: Build Weintek Generator
+        run: dotnet build src/Mx43Sim.WeintekGenerator/Mx43Sim.WeintekGenerator.csproj -c Release --nologo
+
       - name: Build Tests
         run: dotnet build src/Mx43Sim.Tests/Mx43Sim.Tests.csproj -c Release --nologo
 

@@ -78,6 +78,7 @@ public sealed class Sensor
     public int Index => IsAnalog ? 256 + (AnalogChannel - 1) : (Line - 1) * 32 + (Detector - 1);
 
     public string Label { get; set; } = "";
+    public string FullGasName { get; set; } = "";
     public string Unit { get; set; } = "";
     public string ShortGasName { get; set; } = "";
     public int Range { get; set; }

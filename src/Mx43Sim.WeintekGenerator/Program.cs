@@ -10,29 +10,12 @@ using System.Text.Json;
 using Mx43Sim.Core.Cfg;
 using Mx43Sim.Core.Domain;
 using Mx43Sim.Core.Modbus;
+using static Mx43Sim.WeintekGenerator.WeintekLayout;
 
 namespace Mx43Sim.WeintekGenerator;
 
 internal static class Program
 {
-    private const int LwStride = 100;
-    private const int LwNameOffset = 0;
-    private const int LwStatusOffset = 16;
-    private const int LwFullGasOffset = 17;
-    private const int LwRangeOffset = 37;
-    private const int LwDisplayFormatOffset = 38;
-    private const int LwUnitOffset = 39;
-    private const int LwShortGasOffset = 44;
-    private const int LwAlarm1Offset = 51;
-    private const int LwAlarm2Offset = 52;
-    private const int LwAlarm3Offset = 53;
-    private const int LwMeasurementOffset = 70;
-    private const int LwAlarmBitsOffset = 71;
-    private const int LwScaledIntegerOffset = 72;
-    private const int LwScaleDivisorOffset = 73;
-    private const int LwAlarmLevelCountOffset = 74;
-    private const int LwAlarmSeverityOffset = 75;
-
     private static int Main(string[] args)
     {
         if (args.Length == 0 || args.Any(a => a is "-h" or "--help"))
@@ -93,10 +76,7 @@ internal static class Program
         }
 
         var cfg = new Mx43CfgParser(cfgPath).Parse();
-        var detectors = cfg.Sensors
-            .OrderBy(s => s.Index)
-            .Select((sensor, index) => DetectorPlan.From(sensor, index + 1))
-            .ToArray();
+        var detectors = DetectorPlanner.Create(cfg);
 
         Directory.CreateDirectory(outputDir);
         Directory.CreateDirectory(Path.Combine(outputDir, "macros"));
@@ -107,8 +87,8 @@ internal static class Program
         WriteTrendChannelsCsv(outputDir, detectors);
         WriteMx43TagCsv(outputDir, detectors);
         WriteLocalTagCsv(outputDir, detectors);
-        WriteConfigExtractorMacros(outputDir, detectors);
-        WriteRuntimeSamplerMacro(outputDir, detectors);
+        MacroGenerator.WriteConfigExtractors(outputDir, detectors);
+        MacroGenerator.WriteRuntimeSampler(outputDir, detectors);
         WriteReadme(outputDir, cfgPath, cfg, detectors);
 
         if (templateCxob is not null)
@@ -267,6 +247,7 @@ internal static class Program
             WriteTagRow(sb, $"Det{d.ScreenNo}-Alarm3", "cMT", "LW", d.LwAlarm3, 1, "Raw alarm 3 threshold");
             WriteTagRow(sb, $"Det{d.ScreenNo}-Measurement", "cMT", "LW", d.LwMeasurement, 1, "Raw live measurement");
             WriteTagRow(sb, $"Det{d.ScreenNo}-AlarmBits", "cMT", "LW", d.LwAlarmBits, 1, "Live alarm bits");
+            WriteTagRow(sb, $"Det{d.ScreenNo}-ScaledInteger", "cMT", "LW", d.LwScaledInteger, 1, "Raw measurement for numeric objects configured with display decimals");
             WriteTagRow(sb, $"Det{d.ScreenNo}-ScaleDivisor", "cMT", "LW", d.LwScaleDivisor, 1, "1, 10, 100... derived from display format");
             WriteTagRow(sb, $"Det{d.ScreenNo}-AlarmLevelCount", "cMT", "LW", d.LwAlarmLevelCount, 1, "Configured alarm levels from MX43 thresholds");
             WriteTagRow(sb, $"Det{d.ScreenNo}-AlarmSeverity", "cMT", "LW", d.LwAlarmSeverity, 1, "0=normal, 1=yellow, 2=orange, 3=red; Alarm2 is red when only two levels exist");
@@ -283,90 +264,6 @@ internal static class Program
         sb.AppendCsv(length);
         sb.AppendCsv(comment, last: true);
         sb.AppendLine();
-    }
-
-    private static void WriteConfigExtractorMacros(string outputDir, DetectorPlan[] detectors)
-    {
-        foreach (var group in detectors.Chunk(8))
-        {
-            int first = group.First().ScreenNo;
-            int last = group.Last().ScreenNo;
-            var sb = new StringBuilder();
-            sb.AppendLine("macro_command main()");
-            sb.AppendLine();
-            foreach (var d in group)
-            {
-                sb.AppendLine($"short Det{d.ScreenNo}_Info[{Mx43AddressMap.ConfigBlockSize}]");
-                sb.AppendLine($"short Det{d.ScreenNo}_ScaleDivisor");
-                sb.AppendLine($"short Det{d.ScreenNo}_AlarmLevelCount");
-            }
-            sb.AppendLine();
-            foreach (var d in group)
-            {
-                sb.AppendLine($"Det{d.ScreenNo}_ScaleDivisor = {d.ScaleDivisor}");
-                sb.AppendLine($"Det{d.ScreenNo}_AlarmLevelCount = {d.AlarmLevelCount}");
-                sb.AppendLine($"GetData(Det{d.ScreenNo}_Info[0], \"MX43\", \"info-D{d.ScreenNo}\", {Mx43AddressMap.ConfigBlockSize})");
-                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[0], \"cMT\", LW, {d.LwName}, 16) // name");
-                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[16], \"cMT\", LW, {d.LwStatus}, 1) // status");
-                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[17], \"cMT\", LW, {d.LwFullGas}, 20) // full gas name");
-                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[37], \"cMT\", LW, {d.LwRange}, 1) // range, raw");
-                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[38], \"cMT\", LW, {d.LwDisplayFormat}, 1) // display format / decimal places");
-                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[39], \"cMT\", LW, {d.LwUnit}, 5) // unit");
-                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[44], \"cMT\", LW, {d.LwShortGas}, 6) // abbreviated gas name");
-                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[51], \"cMT\", LW, {d.LwAlarm1}, 1) // alarm 1 threshold, raw");
-                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[52], \"cMT\", LW, {d.LwAlarm2}, 1) // alarm 2 threshold, raw");
-                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[53], \"cMT\", LW, {d.LwAlarm3}, 1) // alarm 3 threshold, raw");
-                sb.AppendLine($"SetData(Det{d.ScreenNo}_ScaleDivisor, \"cMT\", LW, {d.LwScaleDivisor}, 1) // 10^displayFormat from cfg");
-                sb.AppendLine($"SetData(Det{d.ScreenNo}_AlarmLevelCount, \"cMT\", LW, {d.LwAlarmLevelCount}, 1) // number of configured instant alarm levels");
-                sb.AppendLine();
-            }
-            sb.AppendLine("end macro_command");
-
-            string file = Path.Combine(outputDir, "macros", $"config-extractor_{first:00}_{last:00}.txt");
-            File.WriteAllText(file, sb.ToString());
-        }
-    }
-
-    private static void WriteRuntimeSamplerMacro(string outputDir, DetectorPlan[] detectors)
-    {
-        var sb = new StringBuilder();
-        sb.AppendLine("macro_command main()");
-        sb.AppendLine();
-        foreach (var d in detectors)
-        {
-            sb.AppendLine($"short Det{d.ScreenNo}_Measurement");
-            sb.AppendLine($"short Det{d.ScreenNo}_AlarmBits");
-            sb.AppendLine($"short Det{d.ScreenNo}_AlarmSeverity");
-        }
-        sb.AppendLine();
-        foreach (var d in detectors)
-        {
-            sb.AppendLine($"Det{d.ScreenNo}_AlarmSeverity = 0");
-            sb.AppendLine($"GetData(Det{d.ScreenNo}_Measurement, \"MX43\", \"meas-D{d.ScreenNo}\", 1)");
-            sb.AppendLine($"GetData(Det{d.ScreenNo}_AlarmBits, \"MX43\", \"alarm-D{d.ScreenNo}\", 1)");
-            sb.AppendLine($"// Effective severity: if only two alarm levels are configured, Alarm 2 is the red/high alarm.");
-            sb.AppendLine($"if (Det{d.ScreenNo}_AlarmBits & 0x0040) <> 0 then");
-            sb.AppendLine($"    Det{d.ScreenNo}_AlarmSeverity = 3");
-            sb.AppendLine($"else if (Det{d.ScreenNo}_AlarmBits & 0x0020) <> 0 then");
-            sb.AppendLine($"    Det{d.ScreenNo}_AlarmSeverity = 3");
-            sb.AppendLine($"else if (Det{d.ScreenNo}_AlarmBits & 0x0010) <> 0 then");
-            sb.AppendLine($"    Det{d.ScreenNo}_AlarmSeverity = 3");
-            sb.AppendLine($"else if (Det{d.ScreenNo}_AlarmBits & 0x0004) <> 0 then");
-            sb.AppendLine($"    Det{d.ScreenNo}_AlarmSeverity = 3");
-            sb.AppendLine($"else if (Det{d.ScreenNo}_AlarmBits & 0x0002) <> 0 then");
-            sb.AppendLine(d.AlarmLevelCount >= 3
-                ? $"    Det{d.ScreenNo}_AlarmSeverity = 2"
-                : $"    Det{d.ScreenNo}_AlarmSeverity = 3");
-            sb.AppendLine($"else if (Det{d.ScreenNo}_AlarmBits & 0x0001) <> 0 then");
-            sb.AppendLine($"    Det{d.ScreenNo}_AlarmSeverity = 1");
-            sb.AppendLine($"SetData(Det{d.ScreenNo}_Measurement, \"cMT\", LW, {d.LwMeasurement}, 1) // raw measurement");
-            sb.AppendLine($"SetData(Det{d.ScreenNo}_AlarmBits, \"cMT\", LW, {d.LwAlarmBits}, 1) // alarm bits");
-            sb.AppendLine($"SetData(Det{d.ScreenNo}_Measurement, \"cMT\", LW, {d.LwScaledInteger}, 1) // keep raw; numeric object should use {d.DisplayFormat} decimal(s)");
-            sb.AppendLine($"SetData(Det{d.ScreenNo}_AlarmSeverity, \"cMT\", LW, {d.LwAlarmSeverity}, 1) // 0 normal, 1 yellow, 2 orange, 3 red");
-            sb.AppendLine();
-        }
-        sb.AppendLine("end macro_command");
-        File.WriteAllText(Path.Combine(outputDir, "macros", "runtime-sampler.txt"), sb.ToString());
     }
 
     private static void WriteReadme(string outputDir, string cfgPath, Mx43Config cfg, DetectorPlan[] detectors)
@@ -389,7 +286,7 @@ internal static class Program
         sb.AppendLine("- `macros/runtime-sampler.txt`: periodically reads live measurements and alarm bits.");
         sb.AppendLine("- `*.generated.cxob`: optional output when `--template-cxob` is used. This is a conservative template patch, not a full EasyBuilder compile.");
         sb.AppendLine("- `*.template-report.md`: optional report describing the template's available fixed-width slots.");
-        sb.AppendLine("- `*.warnings.txt`: optional patch warnings; if present, the generated `.cxob` is partial.");
+        sb.AppendLine("- `*.warnings.txt`: patch notices and warnings. Expansion notices are informational; skipped, missing or truncated fields mean the `.cxob` is partial.");
         sb.AppendLine();
         sb.AppendLine("## Decimal Handling");
         sb.AppendLine();
@@ -413,7 +310,7 @@ internal static class Program
         sb.AppendLine();
         sb.AppendLine("Default `.cxob` patching preserves the original `project` payload length. This is the mode to use when the output must decompile in EasyBuilder with the template password, but too-short fields may be truncated or skipped with warnings.");
         sb.AppendLine();
-        sb.AppendLine("`--allow-binary-expansion` can rebuild variable-length label/tag sections so longer labels and addresses fit. It is experimental and has been observed to trigger EasyBuilder password errors during decompile on password-protected templates.");
+        sb.AppendLine("`--allow-binary-expansion` rebuilds mapped variable-length label/tag sections, project lengths and known relocation metadata so longer labels and addresses fit. The result is structurally validated by the generator but still requires an EasyBuilder compile/decompile and offline-simulator check because the complete proprietary project format is not documented.");
         File.WriteAllText(Path.Combine(outputDir, "README.md"), sb.ToString());
     }
 
@@ -430,20 +327,10 @@ internal static class Program
             string projectPath = FindProjectPayloadPath(tempDir);
             if (!File.Exists(projectPath)) throw new InvalidOperationException("Template CXOB does not contain a project payload.");
 
-            byte[] project = File.ReadAllBytes(projectPath);
-            var warnings = new List<string>();
+            ProjectPatchResult patch = PatchProjectPayload(File.ReadAllBytes(projectPath), detectors, allowBinaryExpansion);
+            byte[] project = patch.Project;
+            var warnings = patch.Warnings.ToList();
             TemplateReport report = AnalyzeTemplate(project, detectors);
-            if (allowBinaryExpansion)
-            {
-                project = ExpandDetectorLabelsIfNeeded(project, detectors, warnings);
-                project = ExpandInfoTagAddressFieldsIfNeeded(project, detectors, warnings);
-            }
-            else
-            {
-                warnings.Add("Binary expansion disabled; CXOB patch preserves original project payload length for EasyBuilder password/decompile compatibility.");
-            }
-            PatchDetectorLabels(project, detectors, warnings);
-            PatchInfoTags(project, detectors, warnings);
             File.WriteAllBytes(projectPath, project);
 
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputCxob)) ?? Directory.GetCurrentDirectory());
@@ -458,12 +345,36 @@ internal static class Program
                 File.WriteAllLines(warningPath, warnings.Distinct(StringComparer.Ordinal));
                 Console.WriteLine($"Template patch warnings written to: {warningPath}");
             }
+            else if (File.Exists(warningPath))
+            {
+                File.Delete(warningPath);
+            }
         }
         finally
         {
             try { Directory.Delete(tempDir, recursive: true); }
             catch { /* best effort cleanup */ }
         }
+    }
+
+    internal static ProjectPatchResult PatchProjectPayload(byte[] source, DetectorPlan[] detectors, bool allowBinaryExpansion)
+    {
+        byte[] project = source.ToArray();
+        var warnings = new List<string>();
+        ValidateProjectStructure(project);
+        if (allowBinaryExpansion)
+        {
+            project = ExpandDetectorLabelsIfNeeded(project, detectors, warnings);
+            project = ExpandInfoTagAddressFieldsIfNeeded(project, detectors, warnings);
+        }
+        else
+        {
+            warnings.Add("Binary expansion disabled; CXOB patch preserves original project payload length for EasyBuilder password/decompile compatibility.");
+        }
+        PatchDetectorLabels(project, detectors, warnings);
+        PatchInfoTags(project, detectors, warnings);
+        ValidateProjectStructure(project);
+        return new ProjectPatchResult(project, warnings.Distinct(StringComparer.Ordinal).ToArray());
     }
 
     private static string FindProjectPayloadPath(string cxobRoot)
@@ -518,8 +429,8 @@ internal static class Program
 
             byte[] nameBytes = Encoding.ASCII.GetBytes(tag.Name);
             byte[] addressBytes = Encoding.ASCII.GetBytes(address);
-            int nameLen = nameBytes.Length + 1;
-            int addressLen = addressBytes.Length + 1;
+            int nameLen = tag.NameFieldLength;
+            int addressLen = Math.Max(tag.AddressFieldLength, addressBytes.Length + 1);
             if (nameLen > byte.MaxValue || addressLen > byte.MaxValue)
                 throw new InvalidOperationException($"Tag record too long after expansion: {tag.Name}");
 
@@ -528,26 +439,19 @@ internal static class Program
             rebuilt.WriteByte(tag.Kind);
             rebuilt.WriteByte((byte)nameLen);
             rebuilt.WriteByte((byte)addressLen);
-            rebuilt.Write(nameBytes);
-            rebuilt.WriteByte(0);
-            rebuilt.Write(addressBytes);
-            rebuilt.WriteByte(0);
+            WriteNullTerminatedField(rebuilt, nameBytes, nameLen);
+            WriteNullTerminatedField(rebuilt, addressBytes, addressLen);
         }
 
         byte[] newTable = rebuilt.ToArray();
         int oldTableLength = oldMacroOffset - tableStart;
         int delta = newTable.Length - oldTableLength;
-        if (delta == 0) return project;
-
         byte[] updated = new byte[project.Length + delta];
         Buffer.BlockCopy(project, 0, updated, 0, tableStart);
         Buffer.BlockCopy(newTable, 0, updated, tableStart, newTable.Length);
         Buffer.BlockCopy(project, oldMacroOffset, updated, tableStart + newTable.Length, project.Length - oldMacroOffset);
 
-        int newMacroOffset = oldMacroOffset + delta;
-        int newTagDataOffset = oldTagDataOffset + delta;
-        ReplaceInt32(updated, oldMacroOffset, newMacroOffset);
-        ReplaceInt32(updated, oldTagDataOffset, newTagDataOffset);
+        RelocateProject(project, updated, oldMacroOffset, delta, oldMacroOffset, oldTagDataOffset);
 
         warnings.Add($"Expanded ENHANCEDTAGS_L32 by {delta} byte(s) so info-D addresses can fit this CFG.");
         return updated;
@@ -561,7 +465,7 @@ internal static class Program
         bool needsExpansion = false;
         foreach (var d in detectors.Take(labels.Length))
         {
-            int required = Encoding.UTF8.GetByteCount(SanitizeLabelText(d.Label));
+            int required = Encoding.UTF8.GetByteCount(d.Label);
             var slot = labels.FirstOrDefault(l => l.Slot == d.ScreenNo);
             if (slot is not null && required > slot.ValueLength)
             {
@@ -589,35 +493,34 @@ internal static class Program
         using var rebuilt = new MemoryStream();
         foreach (var slot in labels.OrderBy(l => l.Slot))
         {
-            string value = slot.Slot <= detectors.Length ? SanitizeLabelText(detectors[slot.Slot - 1].Label) : slot.Slot.ToString(CultureInfo.InvariantCulture);
+            string value = slot.Slot <= detectors.Length ? detectors[slot.Slot - 1].Label : slot.Slot.ToString(CultureInfo.InvariantCulture);
             byte[] keyBytes = Encoding.ASCII.GetBytes(slot.Key);
             byte[] valueBytes = Encoding.UTF8.GetBytes(value);
             byte[] suffixBytes = slot.Suffix;
-            if (keyBytes.Length > byte.MaxValue || valueBytes.Length > byte.MaxValue || suffixBytes.Length > byte.MaxValue)
+            int valueLength = Math.Max(slot.ValueLength, valueBytes.Length);
+            if (keyBytes.Length > byte.MaxValue || valueLength > byte.MaxValue || suffixBytes.Length > byte.MaxValue)
                 throw new InvalidOperationException($"Detector label record too long: {slot.Key}");
 
             rebuilt.WriteByte((byte)keyBytes.Length);
-            rebuilt.WriteByte((byte)valueBytes.Length);
+            rebuilt.WriteByte((byte)valueLength);
             rebuilt.WriteByte((byte)suffixBytes.Length);
             rebuilt.Write(keyBytes);
             rebuilt.Write(valueBytes);
+            for (int i = valueBytes.Length; i < valueLength; i++) rebuilt.WriteByte((byte)' ');
             rebuilt.Write(suffixBytes);
         }
 
         byte[] newLabels = rebuilt.ToArray();
         int oldLabelsLength = oldLabelsEnd - firstRecordStart;
         int delta = newLabels.Length - oldLabelsLength;
-        if (delta == 0) return project;
-
         byte[] updated = new byte[project.Length + delta];
         Buffer.BlockCopy(project, 0, updated, 0, firstRecordStart);
         Buffer.BlockCopy(newLabels, 0, updated, firstRecordStart, newLabels.Length);
         Buffer.BlockCopy(project, oldLabelsEnd, updated, firstRecordStart + newLabels.Length, project.Length - oldLabelsEnd);
 
-        ReplaceInt32(updated, oldMacroOffset, oldMacroOffset + delta);
-        ReplaceInt32(updated, oldTagDataOffset, oldTagDataOffset + delta);
+        RelocateProject(project, updated, oldLabelsEnd, delta, oldMacroOffset, oldTagDataOffset);
 
-        warnings.Add($"Expanded detector label records by {delta} byte(s) so labels can fit this CFG. This experimental mode may fail EasyBuilder password/decompile checks.");
+        warnings.Add($"Expanded detector label records by {delta} byte(s) so labels can fit this CFG; EasyBuilder validation is still required.");
         return updated;
     }
 
@@ -653,7 +556,7 @@ internal static class Program
             {
                 warnings.Add($"Missing Det-{d.ScreenNo} label slot for '{d.Label}'.");
             }
-            else if (Encoding.ASCII.GetByteCount(ToAscii(d.Label)) > label.ValueLength)
+            else if (Encoding.UTF8.GetByteCount(d.Label) > label.ValueLength)
             {
                 warnings.Add($"Det-{d.ScreenNo} label slot is {label.ValueLength} chars; '{d.Label}' will be truncated.");
             }
@@ -755,10 +658,8 @@ internal static class Program
 
     private static IEnumerable<DetectorLabelSlot> ParseDetectorLabelSlots(byte[] project)
     {
-        int det1 = IndexOf(project, Encoding.ASCII.GetBytes("Det-1"));
-        if (det1 < 3) yield break;
-
-        int recordStart = det1 - 3;
+        int recordStart = FindDetectorLabelRecordStart(project);
+        if (recordStart < 0) yield break;
         for (int slot = 1; slot <= 32; slot++)
         {
             if (recordStart + 3 > project.Length) yield break;
@@ -773,7 +674,7 @@ internal static class Program
 
             string key = Encoding.ASCII.GetString(project, keyOffset, keyLen);
             if (!key.Equals($"Det-{slot}", StringComparison.Ordinal)) yield break;
-            string value = Encoding.ASCII.GetString(project, valueOffset, valueLen);
+            string value = Encoding.UTF8.GetString(project, valueOffset, valueLen);
             byte[] suffix = project[suffixOffset..next];
             yield return new DetectorLabelSlot(recordStart, next, slot, key, value, valueLen, suffix);
             recordStart = next;
@@ -840,14 +741,13 @@ internal static class Program
 
     private static void PatchDetectorLabels(byte[] project, DetectorPlan[] detectors, List<string> warnings)
     {
-        int det1 = IndexOf(project, Encoding.ASCII.GetBytes("Det-1"));
-        if (det1 < 3)
+        int recordStart = FindDetectorLabelRecordStart(project);
+        if (recordStart < 0)
         {
             warnings.Add("Could not locate Det-1 label-library entry; detector labels were not patched.");
             return;
         }
 
-        int recordStart = det1 - 3;
         for (int slot = 1; slot <= 32; slot++)
         {
             if (recordStart + 3 > project.Length)
@@ -878,7 +778,7 @@ internal static class Program
             }
 
             string label = slot <= detectors.Length ? detectors[slot - 1].Label : slot.ToString(CultureInfo.InvariantCulture);
-            WriteFixedAscii(project, valueOffset, valueLen, label, warnings, $"label Det-{slot}");
+            WriteFixedUtf8(project, valueOffset, valueLen, label, warnings, $"label Det-{slot}");
             recordStart = next;
         }
     }
@@ -935,14 +835,27 @@ internal static class Program
     }
 
     private static int IndexOf(byte[] haystack, byte[] needle)
+        => IndexOf(haystack, needle, 0);
+
+    private static int IndexOf(byte[] haystack, byte[] needle, int start)
     {
-        for (int i = 0; i <= haystack.Length - needle.Length; i++)
+        for (int i = Math.Max(0, start); i <= haystack.Length - needle.Length; i++)
         {
             int j = 0;
             for (; j < needle.Length; j++) if (haystack[i + j] != needle[j]) break;
             if (j == needle.Length) return i;
         }
         return -1;
+    }
+
+    private static int FindDetectorLabelRecordStart(byte[] project)
+    {
+        int library = IndexOf(project, Encoding.ASCII.GetBytes("LABE_LIB1"));
+        int tagTable = IndexOf(project, Encoding.ASCII.GetBytes("ENHANCEDTAGS_L32"));
+        if (library < 0 || tagTable <= library) return -1;
+
+        int key = IndexOf(project, Encoding.ASCII.GetBytes("Det-1"), library);
+        return key >= 3 && key < tagTable ? key - 3 : -1;
     }
 
     private static string ReadNullTerminatedAscii(byte[] data, int offset, int length)
@@ -965,128 +878,126 @@ internal static class Program
         Array.Copy(bytes, 0, data, offset, bytes.Length);
     }
 
-    private static void WriteFixedAscii(byte[] data, int offset, int length, string value, List<string> warnings, string field)
+    private static void WriteFixedUtf8(byte[] data, int offset, int length, string value, List<string> warnings, string field)
     {
-        byte[] bytes = Encoding.ASCII.GetBytes(ToAscii(value));
-        if (bytes.Length > length)
+        int charCount = value.Length;
+        int byteCount = Encoding.UTF8.GetByteCount(value);
+        if (byteCount > length)
         {
             warnings.Add($"Truncated {field}: '{value}' to {length} byte(s).");
-            Array.Copy(bytes, 0, data, offset, length);
-            return;
+            charCount = 0;
+            byteCount = 0;
+            foreach (Rune rune in value.EnumerateRunes())
+            {
+                if (byteCount + rune.Utf8SequenceLength > length) break;
+                byteCount += rune.Utf8SequenceLength;
+                charCount += rune.Utf16SequenceLength;
+            }
         }
 
         for (int i = 0; i < length; i++) data[offset + i] = (byte)' ';
-        Array.Copy(bytes, 0, data, offset, bytes.Length);
+        Encoding.UTF8.GetBytes(value.AsSpan(0, charCount), data.AsSpan(offset, byteCount));
     }
 
-    private static void ReplaceInt32(byte[] data, int oldValue, int newValue)
+    private static void WriteNullTerminatedField(Stream output, byte[] value, int fieldLength)
     {
-        byte[] oldBytes = BitConverter.GetBytes(oldValue);
-        byte[] newBytes = BitConverter.GetBytes(newValue);
-        for (int i = 0; i <= data.Length - 4; i++)
-        {
-            if (data[i] == oldBytes[0] && data[i + 1] == oldBytes[1] && data[i + 2] == oldBytes[2] && data[i + 3] == oldBytes[3])
-            {
-                Buffer.BlockCopy(newBytes, 0, data, i, 4);
-            }
-        }
+        output.Write(value);
+        for (int i = value.Length; i < fieldLength; i++) output.WriteByte(0);
     }
 
-    private static string ToAscii(string text)
+    private static void RelocateProject(
+        byte[] original,
+        byte[] updated,
+        int movedRegionStart,
+        int delta,
+        int oldMacroOffset,
+        int oldTagDataOffset)
     {
-        var sb = new StringBuilder(text.Length);
-        foreach (char c in text)
+        if (delta == 0) return;
+        ValidateProjectHeader(original);
+
+        int blockALength = BitConverter.ToInt32(original, 0x0C);
+        int blockBLength = BitConverter.ToInt32(original, 0x10);
+        int blockBStart = 20 + blockALength;
+        if (movedRegionStart < blockBStart)
+            throw new InvalidOperationException("Expanded section is outside the relocatable project block.");
+
+        BitConverter.TryWriteBytes(updated.AsSpan(0x10, 4), checked(blockBLength + delta));
+
+        int metadataLength = BitConverter.ToInt32(original, blockBStart);
+        int metadataEnd = checked(blockBStart + metadataLength);
+        if (metadataLength < 4 || metadataEnd > movedRegionStart || metadataEnd > original.Length)
+            throw new InvalidOperationException("Invalid project metadata record before expanded section.");
+
+        // The first block-B record is the project's relocation metadata. Adjust only
+        // values in that record that point into the moved tail of the project.
+        for (int i = blockBStart; i <= metadataEnd - 4; i++)
         {
-            sb.Append(c is >= ' ' and <= '~' ? c : '?');
+            int target = BitConverter.ToInt32(original, i);
+            if (target >= movedRegionStart && target < original.Length)
+                BitConverter.TryWriteBytes(updated.AsSpan(i, 4), checked(target + delta));
         }
-        return sb.ToString();
+
+        int newMacroOffset = oldMacroOffset >= movedRegionStart ? oldMacroOffset + delta : oldMacroOffset;
+        int newTagDataOffset = oldTagDataOffset >= movedRegionStart ? oldTagDataOffset + delta : oldTagDataOffset;
+        if (oldTagDataOffset >= 4 && BitConverter.ToInt32(original, oldTagDataOffset - 4) == oldMacroOffset)
+            BitConverter.TryWriteBytes(updated.AsSpan(newTagDataOffset - 4, 4), newMacroOffset);
     }
 
-    private static string SanitizeLabelText(string text) => ToAscii(text);
-
-    private sealed record DetectorPlan(
-        int ScreenNo,
-        int Line,
-        int Detector,
-        int AnalogChannel,
-        string Label,
-        string Unit,
-        string ShortGasName,
-        int RangeRaw,
-        int DisplayFormat,
-        int ScaleDivisor,
-        int AlarmLevelCount,
-        int HighestConfiguredAlarmBit,
-        int ConfigRegister,
-        int MeasurementRegister,
-        int AlarmRegister,
-        int LwBase,
-        int LwName,
-        int LwStatus,
-        int LwFullGas,
-        int LwRange,
-        int LwDisplayFormat,
-        int LwUnit,
-        int LwShortGas,
-        int LwAlarm1,
-        int LwAlarm2,
-        int LwAlarm3,
-        int LwMeasurement,
-        int LwAlarmBits,
-        int LwScaledInteger,
-        int LwScaleDivisor,
-        int LwAlarmLevelCount,
-        int LwAlarmSeverity)
+    private static void ValidateProjectHeader(byte[] project)
     {
-        public static DetectorPlan From(Sensor sensor, int screenNo)
-        {
-            int lwBase = screenNo * LwStride;
-            int displayFormat = Math.Clamp(sensor.DisplayFormat, 0, 4);
-            int scaleDivisor = (int)Math.Pow(10, displayFormat);
-            int highestConfiguredAlarmBit = ComputeHighestConfiguredAlarmBit(sensor);
-            int alarmLevelCount = highestConfiguredAlarmBit;
-            return new DetectorPlan(
-                screenNo,
-                sensor.Line,
-                sensor.Detector,
-                sensor.AnalogChannel,
-                sensor.Label,
-                sensor.Unit,
-                sensor.ShortGasName,
-                sensor.Range,
-                sensor.DisplayFormat,
-                scaleDivisor,
-                alarmLevelCount,
-                highestConfiguredAlarmBit,
-                Mx43AddressMap.ConfigBaseFor(sensor),
-                Mx43AddressMap.MeasurementRegFor(sensor),
-                Mx43AddressMap.AlarmRegFor(sensor),
-                lwBase,
-                lwBase + LwNameOffset,
-                lwBase + LwStatusOffset,
-                lwBase + LwFullGasOffset,
-                lwBase + LwRangeOffset,
-                lwBase + LwDisplayFormatOffset,
-                lwBase + LwUnitOffset,
-                lwBase + LwShortGasOffset,
-                lwBase + LwAlarm1Offset,
-                lwBase + LwAlarm2Offset,
-                lwBase + LwAlarm3Offset,
-                lwBase + LwMeasurementOffset,
-                lwBase + LwAlarmBitsOffset,
-                lwBase + LwScaledIntegerOffset,
-                lwBase + LwScaleDivisorOffset,
-                lwBase + LwAlarmLevelCountOffset,
-                lwBase + LwAlarmSeverityOffset);
-        }
+        byte[] magic = Encoding.ASCII.GetBytes("MT8000Series");
+        if (project.Length < 20 || !project.AsSpan(0, magic.Length).SequenceEqual(magic))
+            throw new InvalidOperationException("Project payload does not have an MT8000Series header.");
 
-        private static int ComputeHighestConfiguredAlarmBit(Sensor sensor)
+        int blockALength = BitConverter.ToInt32(project, 0x0C);
+        int blockBLength = BitConverter.ToInt32(project, 0x10);
+        if (blockALength < 0 || blockBLength < 0 || 20L + blockALength + blockBLength != project.Length)
+            throw new InvalidOperationException("Project block lengths do not match the payload size.");
+    }
+
+    private static void ValidateProjectStructure(byte[] project)
+    {
+        ValidateProjectHeader(project);
+        int labelStart = FindDetectorLabelRecordStart(project);
+        var labels = ParseDetectorLabelSlots(project).ToArray();
+        var tags = ParseTags(project).ToArray();
+        int tagOffset = UniqueMarkerOffset(project, "ENHANCEDTAGS_L32");
+        int macroOffset = UniqueMarkerOffset(project, "MACRO_ID");
+        int tagDataOffset = UniqueMarkerOffset(project, "TAG_DATA");
+
+        if (labelStart < 0 || labels.Length != 32 || labels[^1].EndOffset != tagOffset)
+            throw new InvalidOperationException("Detector label section is incomplete or does not end at ENHANCEDTAGS_L32.");
+        if (tags.Length == 0 || TagTableEnd(project, tagOffset) != macroOffset)
+            throw new InvalidOperationException("Enhanced tag section is incomplete or does not end at MACRO_ID.");
+        if (macroOffset >= tagDataOffset || tagDataOffset < 4 || BitConverter.ToInt32(project, tagDataOffset - 4) != macroOffset)
+            throw new InvalidOperationException("Macro/TAG_DATA section offsets are inconsistent.");
+    }
+
+    private static int UniqueMarkerOffset(byte[] project, string markerText)
+    {
+        byte[] marker = Encoding.ASCII.GetBytes(markerText);
+        int first = IndexOf(project, marker);
+        if (first < 0 || IndexOf(project, marker, first + 1) >= 0)
+            throw new InvalidOperationException($"Project must contain exactly one {markerText} marker.");
+        return first;
+    }
+
+    private static int TagTableEnd(byte[] project, int markerOffset)
+    {
+        int off = markerOffset + "ENHANCEDTAGS_L32".Length;
+        if (off + 4 > project.Length) return -1;
+        int count = BitConverter.ToInt32(project, off);
+        if (count < 0 || count > 100_000) return -1;
+        off += 4;
+        for (int record = 0; record < count; record++)
         {
-            if (sensor.Thresholds.Inst3 != 0) return 3;
-            if (sensor.Thresholds.Inst2 != 0) return 2;
-            if (sensor.Thresholds.Inst1 != 0) return 1;
-            return 0;
+            if (off + 5 > project.Length) return -1;
+            int next = off + 5 + project[off + 3] + project[off + 4];
+            if (next > project.Length) return -1;
+            off = next;
         }
+        return off;
     }
 
     private sealed record TagRecord(int Offset, byte Flag, byte Class, byte Kind, string Name, string Address, int NameFieldLength, int AddressFieldLength);
@@ -1094,6 +1005,8 @@ internal static class Program
     private sealed record DetectorLabelSlot(int Offset, int EndOffset, int Slot, string Key, string Value, int ValueLength, byte[] Suffix);
 
     private sealed record TemplateReport(IReadOnlyList<TagRecord> Tags, IReadOnlyList<DetectorLabelSlot> Labels, IReadOnlyList<string> Warnings);
+
+    internal sealed record ProjectPatchResult(byte[] Project, IReadOnlyList<string> Warnings);
 
     private static void AppendCsv(this StringBuilder sb, object? value, bool last = false)
     {

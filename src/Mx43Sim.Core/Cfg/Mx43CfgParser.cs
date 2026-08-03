@@ -182,6 +182,7 @@ public sealed class Mx43CfgParser
                 Line = 1,             // placeholder; fixed by AssignLinesFromDetectorList
                 Detector = sensorIdx + 1,
                 Label = label,
+                FullGasName = label,
                 Range = ReadUInt16(off + 0x28),
                 DisplayFormat = ReadUInt16(off + 0x2A),
                 Unit = ReadUtf16(off + 0x2C, 5).TrimEnd('\0', ' '),

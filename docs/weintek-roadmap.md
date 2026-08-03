@@ -2,11 +2,11 @@
 
 ## Near Term
 
-- Validate both `Start.cxob` patch modes in EasyBuilder/offline simulator: length-preserving default for decompile, and `--allow-binary-expansion` for complete labels/addresses.
+- Validate the structurally corrected `--allow-binary-expansion` output in EasyBuilder/offline simulator for both digital and analog configurations.
 - Drive object colors from generated `DetN-AlarmSeverity` instead of directly from Alarm 1/2/3 bits.
 - Use `DisplayFormat` for all numeric objects: live value, range, thresholds and trend axes.
 - Use `trend-channels.csv` to configure a consistent trend/data-sampling page.
-- Keep the conservative `.cxob` patcher limited to mapped structures; fail loudly with warnings otherwise.
+- Export representative Address Tag CSV and macro EDM files from the exact production EasyBuilder/template version and build versioned import adapters from those exports.
 
 ## Alarm Colors
 
@@ -33,6 +33,6 @@ The newer `Start.cxob` template contains 32 detector label slots, 32 `ChN` tags 
 
 - Expand generated/patchable structures beyond labels and existing `info-Dn` tags once more EasyBuilder object records are mapped.
 - Map and rebuild macro/script payloads so generated macros can be embedded directly in `.cxob` without EasyBuilder GUI import.
-- Add automated validation that compares generated tag/register plans against `Mx43AddressMap` and parsed `.cfg` fixtures.
+- Extend automated validation from the current planner, macro and synthetic relocation tests to anonymized binary template fixtures.
 - Add anonymized fixtures for edge cases: O2 decimals, CO2 two decimals, analog channels, 1/2/3 alarm-level detectors, and more than 19 detectors.
 - Consider a small Windows-side smoke test using EasyBuilder offline simulator if a CLI or automatable workflow is found.

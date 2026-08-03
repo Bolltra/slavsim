@@ -164,7 +164,7 @@ public sealed class Mx43RegisterStore
 
         WriteUtf16(result, 0,  c.Label,        16);
         WriteU16  (result, 16, (ushort)(d.Enabled ? 1 : 0));
-        WriteUtf16(result, 17, c.Label,        20);
+        WriteUtf16  (result, 17, string.IsNullOrWhiteSpace(c.FullGasName) ? c.ShortGasName : c.FullGasName, 20);
         WriteU16  (result, 37, (ushort)c.Range);
         WriteU16  (result, 38, (ushort)c.DisplayFormat);
         WriteUtf16(result, 39, c.Unit,         5);

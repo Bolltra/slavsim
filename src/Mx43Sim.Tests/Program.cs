@@ -4,11 +4,13 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using Mx43Sim.Core.Cfg;
 using Mx43Sim.Core.Domain;
 using Mx43Sim.Core.Modbus;
 using Mx43Sim.Core.Sim;
 using Mx43Sim.Core.Updates;
+using Mx43Sim.WeintekGenerator;
 
 namespace Mx43Sim.Tests;
 
@@ -62,6 +64,7 @@ internal static class Program
             TestModbusServer();
             TestSimulator();
             TestAlarmDirections();
+            TestWeintekGenerator();
             TestEndToEnd();
             TestLineAssignment();
             TestLineAssignmentAllFiles();
@@ -177,6 +180,7 @@ internal static class Program
             Line = 1,
             Detector = 1,
             Label = "Ammoniak",
+            FullGasName = "Ammonia",
             Unit = "ppm",
             ShortGasName = "NH3",
             Range = 1000,
@@ -207,6 +211,7 @@ internal static class Program
         var block2 = store.ReadRange(Mx43AddressMap.ConfigBaseFor(1, 2), Mx43AddressMap.ConfigBlockSize);
 
         Assert("config L1D1 label", DecodeUtf16(block1, 0, 16), "Ammoniak");
+        Assert("config L1D1 full gas", DecodeUtf16(block1, 17, 20), "Ammonia");
         Assert("config L1D2 label", DecodeUtf16(block2, 0, 16), "Kanal 2");
         Assert("config L1D2 status", (ushort)block2[16], (ushort)1);
         Assert("config L1D2 range", (ushort)block2[37], (ushort)100);
@@ -358,6 +363,187 @@ internal static class Program
         return 0;
     }
 
+    private static int TestWeintekGenerator()
+    {
+        var cfg = new Mx43Config();
+        cfg.Sensors.Add(AlarmSensor(1, 1, "Only A1", 20, 0, 0,
+            AlarmEnable.Inst1));
+        cfg.Sensors.Add(AlarmSensor(1, 2, "A1+A2", 20, 40, 0,
+            AlarmEnable.Inst1 | AlarmEnable.Inst2));
+        cfg.Sensors.Add(AlarmSensor(1, 3, "A1+A2+A3", 20, 40, 60,
+            AlarmEnable.Inst1 | AlarmEnable.Inst2 | AlarmEnable.Inst3));
+        cfg.Sensors.Add(new Sensor
+        {
+            Line = 1,
+            Detector = 4,
+            Label = "Average A1",
+            Thresholds = new AlarmThresholds { Avg1 = 10 },
+            EnableFlags = AlarmEnable.Avg1,
+        });
+        cfg.Sensors[2].DisplayFormat = 9;
+
+        var plans = DetectorPlanner.Create(cfg);
+        Assert("Weintek one alarm count", plans[0].AlarmLevelCount, 1);
+        Assert("Weintek one alarm highest", plans[0].HighestConfiguredAlarmBit, 1);
+        Assert("Weintek two alarm count", plans[1].AlarmLevelCount, 2);
+        Assert("Weintek two alarm highest", plans[1].HighestConfiguredAlarmBit, 2);
+        Assert("Weintek display format is clamped", plans[2].DisplayFormat, 4);
+        Assert("Weintek display divisor follows format", plans[2].ScaleDivisor, 10_000);
+        Assert("Weintek averaged alarm output is configured", plans[3].AlarmLevelCount, 1);
+
+        string macro = MacroGenerator.RenderRuntimeSampler(plans);
+        Assert("Weintek macro closes if blocks", CountOccurrences(macro, "end if"), 4);
+        Assert("Weintek macro includes underscale as red", macro.Contains("& 0x007C", StringComparison.Ordinal), true);
+        Assert("Weintek sole alarm 1 is red", macro.Contains(
+            "else if (Det1_AlarmBits & 0x0001) <> 0 then\n    Det1_AlarmSeverity = 3\nend if", StringComparison.Ordinal), true);
+        Assert("Weintek two-level alarm 2 is red", macro.Contains(
+            "else if (Det2_AlarmBits & 0x0002) <> 0 then\n    Det2_AlarmSeverity = 3", StringComparison.Ordinal), true);
+        Assert("Weintek three-level alarm 2 is orange", macro.Contains(
+            "else if (Det3_AlarmBits & 0x0002) <> 0 then\n    Det3_AlarmSeverity = 2", StringComparison.Ordinal), true);
+
+        var patchCfg = new Mx43Config();
+        patchCfg.Sensors.Add(new Sensor
+        {
+            Line = 1,
+            Detector = 1,
+            AnalogChannel = 1,
+            Label = "Vägg O2",
+            ShortGasName = "O2",
+            DisplayFormat = 1,
+            Thresholds = new AlarmThresholds { Inst1 = 190 },
+            EnableFlags = AlarmEnable.Inst1,
+        });
+        var patchPlans = DetectorPlanner.Create(patchCfg);
+        byte[] source = BuildSyntheticWeintekProject(out int oldMacroOffset, out int oldTagDataOffset, out int unrelatedPointerOffset);
+        var patch = Mx43Sim.WeintekGenerator.Program.PatchProjectPayload(source, patchPlans, allowBinaryExpansion: true);
+        byte[] project = patch.Project;
+        int newMacroOffset = IndexOf(project, "MACRO_ID");
+        int newTagDataOffset = IndexOf(project, "TAG_DATA");
+
+        Assert("Weintek expanded project grows", project.Length > source.Length, true);
+        Assert("Weintek project header matches expanded size",
+            20 + BitConverter.ToInt32(project, 0x0C) + BitConverter.ToInt32(project, 0x10), project.Length);
+        Assert("Weintek metadata relocates macro", BitConverter.ToInt32(project, 20 + 32 + 8), newMacroOffset);
+        Assert("Weintek metadata relocates TAG_DATA", BitConverter.ToInt32(project, 20 + 32 + 12), newTagDataOffset);
+        Assert("Weintek metadata relocates inner TAG_DATA pointer", BitConverter.ToInt32(project, 20 + 32 + 16), newTagDataOffset + 12);
+        Assert("Weintek TAG_DATA footer points to macro", BitConverter.ToInt32(project, newTagDataOffset - 4), newMacroOffset);
+        Assert("Weintek unrelated offset-like integer is untouched", BitConverter.ToInt32(project, unrelatedPointerOffset), oldMacroOffset);
+        Assert("Weintek expanded label preserves UTF-8", IndexOf(project, Encoding.UTF8.GetBytes("Vägg O2")) >= 0, true);
+        Assert("Weintek expanded analog address is present", IndexOf(project, Encoding.ASCII.GetBytes("257\0")) >= 0, true);
+        Assert("Weintek source buffer remains unchanged", IndexOf(source, Encoding.UTF8.GetBytes("Vägg O2")) < 0, true);
+        Assert("Weintek expansion changed macro offset", newMacroOffset > oldMacroOffset, true);
+        Assert("Weintek expansion changed TAG_DATA offset", newTagDataOffset > oldTagDataOffset, true);
+        return 0;
+    }
+
+    private static Sensor AlarmSensor(int line, int detector, string label, int alarm1, int alarm2, int alarm3, AlarmEnable enabled)
+        => new()
+        {
+            Line = line,
+            Detector = detector,
+            Label = label,
+            Thresholds = new AlarmThresholds { Inst1 = alarm1, Inst2 = alarm2, Inst3 = alarm3 },
+            EnableFlags = enabled,
+        };
+
+    private static byte[] BuildSyntheticWeintekProject(out int macroOffset, out int tagDataOffset, out int unrelatedPointerOffset)
+    {
+        byte[] blockA = new byte[32];
+        byte[] labels;
+        using (var stream = new MemoryStream())
+        using (var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true))
+        {
+            writer.Write(Encoding.ASCII.GetBytes("LABE_LIB1"));
+            for (int slot = 1; slot <= 32; slot++)
+            {
+                byte[] key = Encoding.ASCII.GetBytes($"Det-{slot}");
+                byte[] value = Encoding.ASCII.GetBytes(slot.ToString());
+                writer.Write((byte)key.Length);
+                writer.Write((byte)value.Length);
+                writer.Write((byte)0);
+                writer.Write(key);
+                writer.Write(value);
+            }
+            labels = stream.ToArray();
+        }
+
+        byte[] tags;
+        using (var stream = new MemoryStream())
+        using (var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true))
+        {
+            writer.Write(Encoding.ASCII.GetBytes("ENHANCEDTAGS_L32"));
+            writer.Write(2);
+            WriteSyntheticTag(writer, "info-D1", "1");
+            WriteSyntheticTag(writer, "Ch1", "10");
+            tags = stream.ToArray();
+        }
+
+        const int metadataLength = 64;
+        int blockBStart = 20 + blockA.Length;
+        macroOffset = blockBStart + metadataLength + labels.Length + tags.Length;
+        byte[] macro = new byte["MACRO_ID".Length + 12];
+        Encoding.ASCII.GetBytes("MACRO_ID").CopyTo(macro, 0);
+        tagDataOffset = macroOffset + macro.Length;
+        BitConverter.TryWriteBytes(macro.AsSpan(macro.Length - 4), macroOffset);
+
+        byte[] metadata = new byte[metadataLength];
+        BitConverter.TryWriteBytes(metadata.AsSpan(0, 4), metadataLength);
+        BitConverter.TryWriteBytes(metadata.AsSpan(8, 4), macroOffset);
+        BitConverter.TryWriteBytes(metadata.AsSpan(12, 4), tagDataOffset);
+        BitConverter.TryWriteBytes(metadata.AsSpan(16, 4), tagDataOffset + 12);
+
+        byte[] tagData = new byte[32];
+        Encoding.ASCII.GetBytes("TAG_DATA").CopyTo(tagData, 0);
+        int blockBLength = metadata.Length + labels.Length + tags.Length + macro.Length + tagData.Length;
+        byte[] project = new byte[20 + blockA.Length + blockBLength];
+        Encoding.ASCII.GetBytes("MT8000Series").CopyTo(project, 0);
+        BitConverter.TryWriteBytes(project.AsSpan(0x0C, 4), blockA.Length);
+        BitConverter.TryWriteBytes(project.AsSpan(0x10, 4), blockBLength);
+        blockA.CopyTo(project, 20);
+        metadata.CopyTo(project, blockBStart);
+        labels.CopyTo(project, blockBStart + metadata.Length);
+        tags.CopyTo(project, blockBStart + metadata.Length + labels.Length);
+        macro.CopyTo(project, macroOffset);
+        tagData.CopyTo(project, tagDataOffset);
+
+        unrelatedPointerOffset = 20;
+        BitConverter.TryWriteBytes(project.AsSpan(unrelatedPointerOffset, 4), macroOffset);
+        return project;
+    }
+
+    private static void WriteSyntheticTag(BinaryWriter writer, string name, string address)
+    {
+        byte[] nameBytes = Encoding.ASCII.GetBytes(name);
+        byte[] addressBytes = Encoding.ASCII.GetBytes(address);
+        writer.Write((byte)1);
+        writer.Write((byte)2);
+        writer.Write((byte)3);
+        writer.Write((byte)(nameBytes.Length + 1));
+        writer.Write((byte)(addressBytes.Length + 1));
+        writer.Write(nameBytes);
+        writer.Write((byte)0);
+        writer.Write(addressBytes);
+        writer.Write((byte)0);
+    }
+
+    private static int CountOccurrences(string text, string value)
+    {
+        int count = 0;
+        for (int offset = 0; (offset = text.IndexOf(value, offset, StringComparison.Ordinal)) >= 0; offset += value.Length) count++;
+        return count;
+    }
+
+    private static int IndexOf(byte[] data, string value) => IndexOf(data, Encoding.ASCII.GetBytes(value));
+
+    private static int IndexOf(byte[] data, byte[] value)
+    {
+        for (int i = 0; i <= data.Length - value.Length; i++)
+        {
+            if (data.AsSpan(i, value.Length).SequenceEqual(value)) return i;
+        }
+        return -1;
+    }
+
     private static int TestEndToEnd()
     {
         var cfgPath = FindFixture(c => c.Sensors.Count > 0);
@@ -489,6 +675,9 @@ internal static class Program
             var store = new Mx43RegisterStore();
             var sim = new Mx43Simulator(store);
             sim.Load(ppm, null);
+            var analogConfig = store.ReadRange(Mx43AddressMap.AnalogConfigBase, Mx43AddressMap.ConfigBlockSize);
+            Assert("ppm configured analog channel is enabled", analogConfig[16], (short)1);
+            Assert("ppm analog full gas name is preserved", string.IsNullOrWhiteSpace(DecodeUtf16(analogConfig, 17, 20)), false);
             sim.SetMeasurement(1, 1, 42);
             Assert("ppm analog L1D1 writes reg 2257", store.ReadReg(Mx43AddressMap.AnalogMeasurementRegFor(1)), (short)42);
             Assert("ppm analog L1D1 does not write digital reg 2001", store.ReadReg(Mx43AddressMap.MeasurementRegFor(1, 1)), (short)0);

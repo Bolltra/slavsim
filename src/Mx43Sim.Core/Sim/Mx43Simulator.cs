@@ -40,7 +40,11 @@ public sealed class Mx43Simulator
         foreach (var s in config.Sensors)
         {
             int idx = s.Index;
-            if (idx >= 0 && idx < _store.Detectors.Length) _store.Detectors[idx].Config = s;
+            if (idx >= 0 && idx < _store.Detectors.Length)
+            {
+                _store.Detectors[idx].Config = s;
+                _store.Detectors[idx].Enabled = true;
+            }
         }
         // Oxygen detectors start at normal atmospheric concentration (21.0%).
         // Other detectors start at zero, with no active alarms.

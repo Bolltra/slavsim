@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Mx43Sim.Core\Mx43Sim.Core.csproj" />
+    <ProjectReference Include="..\Mx43Sim.WeintekGenerator\Mx43Sim.WeintekGenerator.csproj" />
   </ItemGroup>
 </Project>

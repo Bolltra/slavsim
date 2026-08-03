@@ -49,19 +49,19 @@ Generated output:
 - `macros/runtime-sampler.txt`: Weintek macro text that samples live measurement and alarm bits.
 - `*.generated.cxob`: only when `--template-cxob` is used.
 - `*.template-report.md`: describes the template's available `info-Dn`, `ChN` and label slots.
-- `*.warnings.txt`: only written when a conservative `.cxob` patch could not fully fit the requested `.cfg`.
+- `*.warnings.txt`: patch notices and warnings. Expansion notices are informational; skipped, missing or truncated fields mean the `.cxob` is partial.
 
-The `.cxob` output is currently a conservative patch of an existing working template. It does not compile a new EasyBuilder project. It patches the stable structures mapped so far:
+The `.cxob` output is a patch of an existing working template. It does not compile a new EasyBuilder project. It patches the stable structures mapped so far:
 
 - Detector label-library entries `Det-1..Det-32`.
 - Existing `info-Dn` MX43 config-tag addresses.
-- Optional variable-length rebuilds of the detector label records and `ENHANCEDTAGS_L32` table when `--allow-binary-expansion` is used, including offset-reference updates for the following binary sections.
+- Optional variable-length rebuilds of the detector label records and `ENHANCEDTAGS_L32` table when `--allow-binary-expansion` is used, including project block lengths, mapped relocation metadata and the macro/TAG_DATA link.
 
 It intentionally does not add new EasyBuilder objects, trend objects, macros or tag-table entries inside the `.cxob` because the `project` payload contains offset references and a separate `script` payload that likely depends on EasyBuilder's compiler.
 
 The `Start.cxob` layout uses `mt8000/project` and has 32 detector labels, 32 `ChN` tags and 32 `info-Dn` tags. With `--allow-binary-expansion`, the patcher can expand its short placeholder fields so digital config registers such as `33..48` and analog config registers `257..264` fit.
 
-Rule of thumb: if EasyBuilder decompile is the goal, start without `--allow-binary-expansion` and use password `111111` when prompted by templates that require it. Repacking `Start.cxob` unchanged and the default length-preserving patch have both been verified to decompile; the expanded variant has been observed to fail with EasyBuilder password error. Warnings that say a field could not be located, did not fit, or was skipped mean the `.cxob` should be treated as partial and the CSV/macro files should be used to update or create a better EasyBuilder template.
+Rule of thumb: if EasyBuilder decompile is the goal, start without `--allow-binary-expansion` and use password `111111` when prompted by templates that require it. Repacking `Start.cxob` unchanged and the default length-preserving patch have both been verified to decompile. Earlier expanded files failed with an EasyBuilder password error and were subsequently confirmed to have inconsistent project block lengths and internal relocation pointers; the generator now updates and validates those mapped structures. Expanded output still requires a new EasyBuilder decompile/offline-simulator check because the complete proprietary format is not documented. Warnings that say a field could not be located, did not fit, or was skipped mean the `.cxob` should be treated as partial.
 
 ## CXOB Strategy
 
@@ -74,13 +74,15 @@ The safest incremental path is:
 3. Compile the template to `.cxob` in EasyBuilder Pro.
 4. Later, build a patcher that updates the decompiled/template `project` payload directly once the needed structures are mapped.
 
-Public documentation shows import/export support for Address Tag Library CSV/Excel, Label Tag Library CSV/Excel/`.lbl`, and macro import/export (`.edm`/macro libraries). I did not find a documented command-line compiler for `.cmtp` -> `.cxob`; EasyBuilder Pro appears to own that step.
+Public documentation shows import/export support for Address Tag Library CSV/Excel, Label Tag Library CSV/Excel/`.lbl`, and macro import/export (`.edm`/macro libraries). The exact Address Tag CSV columns are driver- and version-dependent, so the generated tag CSV files are manifests until matched to a representative export from the target template. Macro Manager imports `.edm`; generated `.txt` files are source for review/paste unless wrapped in an EasyBuilder-exported EDM template. No documented command-line compiler for `.cmtp` -> `.cxob` was found; EasyBuilder Pro owns that supported step.
+
+The verified binary structures and relocation rules are documented in `weintek-project-format.md`.
 
 ## Trends
 
 Weintek supports data sampling and trend objects, and the existing test `.cxob` already contains trend-related windows and channel-selection macros. The generator currently emits stable measurement tags and LW addresses that trend objects can sample.
 
-The next useful improvement is to generate a trend-channel table from the same detector plan so trend windows can be created or patched automatically. Decimal handling for trends should use the same `DisplayFormat` as live detector values.
+The generated trend-channel table is a deterministic manifest for configuring Data Sampling and Trend Display objects. Decimal handling for trends should use the same `DisplayFormat` as live detector values.
 
 Weintek Trend Display supports sampling channels from Data Sampling objects. The generator can therefore prepare stable per-detector measurement tags, but creating the actual trend object layout still belongs in the EasyBuilder template until the `project` object structures are fully mapped.
 
@@ -91,7 +93,7 @@ The generator emits `DetN-AlarmSeverity` as a local color-driving value:
 - `0`: normal
 - `1`: yellow / Alarm 1
 - `2`: orange / Alarm 2 when three alarm levels exist
-- `3`: red / highest configured alarm level, fault, overscale or out-of-range
+- `3`: red / highest configured alarm level, fault, underscale, overscale or out-of-range
 
 For detectors with only Alarm 1 and Alarm 2 configured, Alarm 2 maps to severity `3`. This avoids the old workaround where Alarm 2 was duplicated into Alarm 3 just to make the Weintek object turn red. For detectors with all three alarm levels configured, Alarm 1/2/3 keep the existing yellow/orange/red behavior.
 
