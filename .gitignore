@@ -46,8 +46,17 @@ $RECYCLE.BIN/
 # Drop real .cfg, .xls and .xlsx files into tests/fixtures/ to run the
 # smoke tests; they are intentionally NOT committed.
 *.cfg
+*.cmtp
+*.cxob
+*.cbox
+*.ccmp
+*.emtp
+*.exob
+*.ecmp
 *.xlsx
 *.xls
-Skärmbild 2026-06-16 145242.png
+Skärmbild*.png
+Screenshot*.png
+local/
 
 # Local diagnostic screenshots

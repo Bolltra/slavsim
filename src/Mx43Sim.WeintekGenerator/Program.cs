@@ -1,0 +1,1114 @@
+using System;
+using System.Globalization;
+using System.Collections.Generic;
+using System.Formats.Tar;
+using System.IO;
+using System.IO.Compression;
+using System.Linq;
+using System.Text;
+using System.Text.Json;
+using Mx43Sim.Core.Cfg;
+using Mx43Sim.Core.Domain;
+using Mx43Sim.Core.Modbus;
+
+namespace Mx43Sim.WeintekGenerator;
+
+internal static class Program
+{
+    private const int LwStride = 100;
+    private const int LwNameOffset = 0;
+    private const int LwStatusOffset = 16;
+    private const int LwFullGasOffset = 17;
+    private const int LwRangeOffset = 37;
+    private const int LwDisplayFormatOffset = 38;
+    private const int LwUnitOffset = 39;
+    private const int LwShortGasOffset = 44;
+    private const int LwAlarm1Offset = 51;
+    private const int LwAlarm2Offset = 52;
+    private const int LwAlarm3Offset = 53;
+    private const int LwMeasurementOffset = 70;
+    private const int LwAlarmBitsOffset = 71;
+    private const int LwScaledIntegerOffset = 72;
+    private const int LwScaleDivisorOffset = 73;
+    private const int LwAlarmLevelCountOffset = 74;
+    private const int LwAlarmSeverityOffset = 75;
+
+    private static int Main(string[] args)
+    {
+        if (args.Length == 0 || args.Any(a => a is "-h" or "--help"))
+        {
+            PrintUsage();
+            return args.Length == 0 ? 1 : 0;
+        }
+
+        string cfgPath = args[0];
+        if (!File.Exists(cfgPath))
+        {
+            Console.Error.WriteLine($"CFG file not found: {cfgPath}");
+            return 2;
+        }
+
+        string outputDir = DefaultOutputDir(cfgPath);
+        string? templateCxob = null;
+        string? cxobOutput = null;
+        bool allowBinaryExpansion = false;
+        for (int i = 1; i < args.Length; i++)
+        {
+            if (args[i] is "-o" or "--output")
+            {
+                if (i + 1 >= args.Length)
+                {
+                    Console.Error.WriteLine("Missing value after --output");
+                    return 2;
+                }
+                outputDir = args[++i];
+            }
+            else if (args[i] == "--template-cxob")
+            {
+                if (i + 1 >= args.Length)
+                {
+                    Console.Error.WriteLine("Missing value after --template-cxob");
+                    return 2;
+                }
+                templateCxob = args[++i];
+            }
+            else if (args[i] == "--cxob-output")
+            {
+                if (i + 1 >= args.Length)
+                {
+                    Console.Error.WriteLine("Missing value after --cxob-output");
+                    return 2;
+                }
+                cxobOutput = args[++i];
+            }
+            else if (args[i] == "--allow-binary-expansion")
+            {
+                allowBinaryExpansion = true;
+            }
+            else
+            {
+                Console.Error.WriteLine($"Unknown argument: {args[i]}");
+                return 2;
+            }
+        }
+
+        var cfg = new Mx43CfgParser(cfgPath).Parse();
+        var detectors = cfg.Sensors
+            .OrderBy(s => s.Index)
+            .Select((sensor, index) => DetectorPlan.From(sensor, index + 1))
+            .ToArray();
+
+        Directory.CreateDirectory(outputDir);
+        Directory.CreateDirectory(Path.Combine(outputDir, "macros"));
+        Directory.CreateDirectory(Path.Combine(outputDir, "tags"));
+
+        WritePlanJson(outputDir, cfg, detectors);
+        WriteDetectorCsv(outputDir, detectors);
+        WriteTrendChannelsCsv(outputDir, detectors);
+        WriteMx43TagCsv(outputDir, detectors);
+        WriteLocalTagCsv(outputDir, detectors);
+        WriteConfigExtractorMacros(outputDir, detectors);
+        WriteRuntimeSamplerMacro(outputDir, detectors);
+        WriteReadme(outputDir, cfgPath, cfg, detectors);
+
+        if (templateCxob is not null)
+        {
+            if (!File.Exists(templateCxob))
+            {
+                Console.Error.WriteLine($"Template CXOB file not found: {templateCxob}");
+                return 2;
+            }
+
+            cxobOutput ??= Path.Combine(outputDir, Path.GetFileNameWithoutExtension(cfgPath) + ".generated.cxob");
+            PatchCxobTemplate(templateCxob, cxobOutput, detectors, allowBinaryExpansion);
+            Console.WriteLine($"Generated template-patched CXOB: {cxobOutput}");
+        }
+
+        Console.WriteLine($"Generated Weintek artifacts for {detectors.Length} detector(s): {outputDir}");
+        Console.WriteLine("Next step: import/map the generated tags/macros into an EasyBuilder Pro cMT template or patch a decompiled project.");
+        return 0;
+    }
+
+    private static void PrintUsage()
+    {
+        Console.WriteLine("Usage:");
+        Console.WriteLine("  dotnet run --project src/Mx43Sim.WeintekGenerator/Mx43Sim.WeintekGenerator.csproj -- <file.cfg> [-o output-dir] [--template-cxob template.cxob] [--cxob-output out.cxob] [--allow-binary-expansion]");
+        Console.WriteLine();
+        Console.WriteLine("  Default CXOB patching preserves project payload length for EasyBuilder decompile/password compatibility.");
+        Console.WriteLine("  --allow-binary-expansion is experimental and may make password-protected CXOB files fail decompile.");
+    }
+
+    private static string DefaultOutputDir(string cfgPath)
+    {
+        string dir = Path.GetDirectoryName(Path.GetFullPath(cfgPath)) ?? Directory.GetCurrentDirectory();
+        string name = Path.GetFileNameWithoutExtension(cfgPath);
+        return Path.Combine(dir, name + ".weintek");
+    }
+
+    private static void WritePlanJson(string outputDir, Mx43Config cfg, DetectorPlan[] detectors)
+    {
+        var plan = new
+        {
+            generator = "Mx43Sim.WeintekGenerator",
+            projectName = cfg.ProjectName,
+            detectorCount = detectors.Length,
+            localLwLayout = new
+            {
+                stride = LwStride,
+                name = LwNameOffset,
+                status = LwStatusOffset,
+                fullGas = LwFullGasOffset,
+                range = LwRangeOffset,
+                displayFormat = LwDisplayFormatOffset,
+                unit = LwUnitOffset,
+                shortGas = LwShortGasOffset,
+                alarm1 = LwAlarm1Offset,
+                alarm2 = LwAlarm2Offset,
+                alarm3 = LwAlarm3Offset,
+                measurement = LwMeasurementOffset,
+                alarmBits = LwAlarmBitsOffset,
+                scaledInteger = LwScaledIntegerOffset,
+                scaleDivisor = LwScaleDivisorOffset,
+                alarmLevelCount = LwAlarmLevelCountOffset,
+                alarmSeverity = LwAlarmSeverityOffset,
+            },
+            detectors,
+        };
+
+        var options = new JsonSerializerOptions { WriteIndented = true };
+        File.WriteAllText(Path.Combine(outputDir, "weintek-plan.json"), JsonSerializer.Serialize(plan, options));
+    }
+
+    private static void WriteDetectorCsv(string outputDir, DetectorPlan[] detectors)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("ScreenNo,Line,Detector,AnalogChannel,Label,Gas,Unit,RangeRaw,DisplayFormat,ScaleDivisor,AlarmLevelCount,HighestConfiguredAlarmBit,ConfigRegister,MeasurementRegister,AlarmRegister,LwBase,LwMeasurement,LwAlarmBits,LwAlarmSeverity");
+        foreach (var d in detectors)
+        {
+            sb.AppendCsv(d.ScreenNo);
+            sb.AppendCsv(d.Line);
+            sb.AppendCsv(d.Detector);
+            sb.AppendCsv(d.AnalogChannel);
+            sb.AppendCsv(d.Label);
+            sb.AppendCsv(d.ShortGasName);
+            sb.AppendCsv(d.Unit);
+            sb.AppendCsv(d.RangeRaw);
+            sb.AppendCsv(d.DisplayFormat);
+            sb.AppendCsv(d.ScaleDivisor);
+            sb.AppendCsv(d.AlarmLevelCount);
+            sb.AppendCsv(d.HighestConfiguredAlarmBit);
+            sb.AppendCsv(d.ConfigRegister);
+            sb.AppendCsv(d.MeasurementRegister);
+            sb.AppendCsv(d.AlarmRegister);
+            sb.AppendCsv(d.LwBase);
+            sb.AppendCsv(d.LwMeasurement);
+            sb.AppendCsv(d.LwAlarmBits);
+            sb.AppendCsv(d.LwAlarmSeverity, last: true);
+            sb.AppendLine();
+        }
+        File.WriteAllText(Path.Combine(outputDir, "detectors.csv"), sb.ToString());
+    }
+
+    private static void WriteTrendChannelsCsv(string outputDir, DetectorPlan[] detectors)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Channel,Label,Gas,Unit,DisplayFormat,ScaleDivisor,AlarmLevelCount,MeasurementRegister,LocalMeasurementLw,AlarmRegister,LocalAlarmBitsLw,LocalAlarmSeverityLw,TemplateTrendTag");
+        foreach (var d in detectors)
+        {
+            sb.AppendCsv(d.ScreenNo);
+            sb.AppendCsv(d.Label);
+            sb.AppendCsv(d.ShortGasName);
+            sb.AppendCsv(d.Unit);
+            sb.AppendCsv(d.DisplayFormat);
+            sb.AppendCsv(d.ScaleDivisor);
+            sb.AppendCsv(d.AlarmLevelCount);
+            sb.AppendCsv(d.MeasurementRegister);
+            sb.AppendCsv(d.LwMeasurement);
+            sb.AppendCsv(d.AlarmRegister);
+            sb.AppendCsv(d.LwAlarmBits);
+            sb.AppendCsv(d.LwAlarmSeverity);
+            sb.AppendCsv(d.ScreenNo <= 32 ? $"Ch{d.ScreenNo}" : "", last: true);
+            sb.AppendLine();
+        }
+        File.WriteAllText(Path.Combine(outputDir, "trend-channels.csv"), sb.ToString());
+    }
+
+    private static void WriteMx43TagCsv(string outputDir, DetectorPlan[] detectors)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Name,Device,Kind,Register,Length,Comment");
+        foreach (var d in detectors)
+        {
+            WriteTagRow(sb, $"info-D{d.ScreenNo}", "MX43", "HoldingRegisterBlock", d.ConfigRegister, Mx43AddressMap.ConfigBlockSize,
+                $"Config block for {d.Label}");
+            WriteTagRow(sb, $"meas-D{d.ScreenNo}", "MX43", "HoldingRegister", d.MeasurementRegister, 1,
+                $"Raw measurement for {d.Label}; divide by scale divisor for display");
+            WriteTagRow(sb, $"alarm-D{d.ScreenNo}", "MX43", "HoldingRegister", d.AlarmRegister, 1,
+                $"Alarm bitfield for {d.Label}");
+        }
+        File.WriteAllText(Path.Combine(outputDir, "tags", "mx43-tags.csv"), sb.ToString());
+    }
+
+    private static void WriteLocalTagCsv(string outputDir, DetectorPlan[] detectors)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Name,Device,Kind,Register,Length,Comment");
+        foreach (var d in detectors)
+        {
+            WriteTagRow(sb, $"Det{d.ScreenNo}-Name", "cMT", "LW", d.LwName, 16, "Detector label");
+            WriteTagRow(sb, $"Det{d.ScreenNo}-Status", "cMT", "LW", d.LwStatus, 1, "Detector enabled status");
+            WriteTagRow(sb, $"Det{d.ScreenNo}-FullGas", "cMT", "LW", d.LwFullGas, 20, "Full gas text");
+            WriteTagRow(sb, $"Det{d.ScreenNo}-Range", "cMT", "LW", d.LwRange, 1, "Raw range from MX43 config");
+            WriteTagRow(sb, $"Det{d.ScreenNo}-DisplayFormat", "cMT", "LW", d.LwDisplayFormat, 1, "Decimal places from MX43 config");
+            WriteTagRow(sb, $"Det{d.ScreenNo}-Unit", "cMT", "LW", d.LwUnit, 5, "Unit text");
+            WriteTagRow(sb, $"Det{d.ScreenNo}-AbbGas", "cMT", "LW", d.LwShortGas, 6, "Abbreviated gas text");
+            WriteTagRow(sb, $"Det{d.ScreenNo}-Alarm1", "cMT", "LW", d.LwAlarm1, 1, "Raw alarm 1 threshold");
+            WriteTagRow(sb, $"Det{d.ScreenNo}-Alarm2", "cMT", "LW", d.LwAlarm2, 1, "Raw alarm 2 threshold");
+            WriteTagRow(sb, $"Det{d.ScreenNo}-Alarm3", "cMT", "LW", d.LwAlarm3, 1, "Raw alarm 3 threshold");
+            WriteTagRow(sb, $"Det{d.ScreenNo}-Measurement", "cMT", "LW", d.LwMeasurement, 1, "Raw live measurement");
+            WriteTagRow(sb, $"Det{d.ScreenNo}-AlarmBits", "cMT", "LW", d.LwAlarmBits, 1, "Live alarm bits");
+            WriteTagRow(sb, $"Det{d.ScreenNo}-ScaleDivisor", "cMT", "LW", d.LwScaleDivisor, 1, "1, 10, 100... derived from display format");
+            WriteTagRow(sb, $"Det{d.ScreenNo}-AlarmLevelCount", "cMT", "LW", d.LwAlarmLevelCount, 1, "Configured alarm levels from MX43 thresholds");
+            WriteTagRow(sb, $"Det{d.ScreenNo}-AlarmSeverity", "cMT", "LW", d.LwAlarmSeverity, 1, "0=normal, 1=yellow, 2=orange, 3=red; Alarm2 is red when only two levels exist");
+        }
+        File.WriteAllText(Path.Combine(outputDir, "tags", "local-lw-tags.csv"), sb.ToString());
+    }
+
+    private static void WriteTagRow(StringBuilder sb, string name, string device, string kind, int register, int length, string comment)
+    {
+        sb.AppendCsv(name);
+        sb.AppendCsv(device);
+        sb.AppendCsv(kind);
+        sb.AppendCsv(register);
+        sb.AppendCsv(length);
+        sb.AppendCsv(comment, last: true);
+        sb.AppendLine();
+    }
+
+    private static void WriteConfigExtractorMacros(string outputDir, DetectorPlan[] detectors)
+    {
+        foreach (var group in detectors.Chunk(8))
+        {
+            int first = group.First().ScreenNo;
+            int last = group.Last().ScreenNo;
+            var sb = new StringBuilder();
+            sb.AppendLine("macro_command main()");
+            sb.AppendLine();
+            foreach (var d in group)
+            {
+                sb.AppendLine($"short Det{d.ScreenNo}_Info[{Mx43AddressMap.ConfigBlockSize}]");
+                sb.AppendLine($"short Det{d.ScreenNo}_ScaleDivisor");
+                sb.AppendLine($"short Det{d.ScreenNo}_AlarmLevelCount");
+            }
+            sb.AppendLine();
+            foreach (var d in group)
+            {
+                sb.AppendLine($"Det{d.ScreenNo}_ScaleDivisor = {d.ScaleDivisor}");
+                sb.AppendLine($"Det{d.ScreenNo}_AlarmLevelCount = {d.AlarmLevelCount}");
+                sb.AppendLine($"GetData(Det{d.ScreenNo}_Info[0], \"MX43\", \"info-D{d.ScreenNo}\", {Mx43AddressMap.ConfigBlockSize})");
+                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[0], \"cMT\", LW, {d.LwName}, 16) // name");
+                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[16], \"cMT\", LW, {d.LwStatus}, 1) // status");
+                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[17], \"cMT\", LW, {d.LwFullGas}, 20) // full gas name");
+                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[37], \"cMT\", LW, {d.LwRange}, 1) // range, raw");
+                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[38], \"cMT\", LW, {d.LwDisplayFormat}, 1) // display format / decimal places");
+                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[39], \"cMT\", LW, {d.LwUnit}, 5) // unit");
+                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[44], \"cMT\", LW, {d.LwShortGas}, 6) // abbreviated gas name");
+                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[51], \"cMT\", LW, {d.LwAlarm1}, 1) // alarm 1 threshold, raw");
+                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[52], \"cMT\", LW, {d.LwAlarm2}, 1) // alarm 2 threshold, raw");
+                sb.AppendLine($"SetData(Det{d.ScreenNo}_Info[53], \"cMT\", LW, {d.LwAlarm3}, 1) // alarm 3 threshold, raw");
+                sb.AppendLine($"SetData(Det{d.ScreenNo}_ScaleDivisor, \"cMT\", LW, {d.LwScaleDivisor}, 1) // 10^displayFormat from cfg");
+                sb.AppendLine($"SetData(Det{d.ScreenNo}_AlarmLevelCount, \"cMT\", LW, {d.LwAlarmLevelCount}, 1) // number of configured instant alarm levels");
+                sb.AppendLine();
+            }
+            sb.AppendLine("end macro_command");
+
+            string file = Path.Combine(outputDir, "macros", $"config-extractor_{first:00}_{last:00}.txt");
+            File.WriteAllText(file, sb.ToString());
+        }
+    }
+
+    private static void WriteRuntimeSamplerMacro(string outputDir, DetectorPlan[] detectors)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("macro_command main()");
+        sb.AppendLine();
+        foreach (var d in detectors)
+        {
+            sb.AppendLine($"short Det{d.ScreenNo}_Measurement");
+            sb.AppendLine($"short Det{d.ScreenNo}_AlarmBits");
+            sb.AppendLine($"short Det{d.ScreenNo}_AlarmSeverity");
+        }
+        sb.AppendLine();
+        foreach (var d in detectors)
+        {
+            sb.AppendLine($"Det{d.ScreenNo}_AlarmSeverity = 0");
+            sb.AppendLine($"GetData(Det{d.ScreenNo}_Measurement, \"MX43\", \"meas-D{d.ScreenNo}\", 1)");
+            sb.AppendLine($"GetData(Det{d.ScreenNo}_AlarmBits, \"MX43\", \"alarm-D{d.ScreenNo}\", 1)");
+            sb.AppendLine($"// Effective severity: if only two alarm levels are configured, Alarm 2 is the red/high alarm.");
+            sb.AppendLine($"if (Det{d.ScreenNo}_AlarmBits & 0x0040) <> 0 then");
+            sb.AppendLine($"    Det{d.ScreenNo}_AlarmSeverity = 3");
+            sb.AppendLine($"else if (Det{d.ScreenNo}_AlarmBits & 0x0020) <> 0 then");
+            sb.AppendLine($"    Det{d.ScreenNo}_AlarmSeverity = 3");
+            sb.AppendLine($"else if (Det{d.ScreenNo}_AlarmBits & 0x0010) <> 0 then");
+            sb.AppendLine($"    Det{d.ScreenNo}_AlarmSeverity = 3");
+            sb.AppendLine($"else if (Det{d.ScreenNo}_AlarmBits & 0x0004) <> 0 then");
+            sb.AppendLine($"    Det{d.ScreenNo}_AlarmSeverity = 3");
+            sb.AppendLine($"else if (Det{d.ScreenNo}_AlarmBits & 0x0002) <> 0 then");
+            sb.AppendLine(d.AlarmLevelCount >= 3
+                ? $"    Det{d.ScreenNo}_AlarmSeverity = 2"
+                : $"    Det{d.ScreenNo}_AlarmSeverity = 3");
+            sb.AppendLine($"else if (Det{d.ScreenNo}_AlarmBits & 0x0001) <> 0 then");
+            sb.AppendLine($"    Det{d.ScreenNo}_AlarmSeverity = 1");
+            sb.AppendLine($"SetData(Det{d.ScreenNo}_Measurement, \"cMT\", LW, {d.LwMeasurement}, 1) // raw measurement");
+            sb.AppendLine($"SetData(Det{d.ScreenNo}_AlarmBits, \"cMT\", LW, {d.LwAlarmBits}, 1) // alarm bits");
+            sb.AppendLine($"SetData(Det{d.ScreenNo}_Measurement, \"cMT\", LW, {d.LwScaledInteger}, 1) // keep raw; numeric object should use {d.DisplayFormat} decimal(s)");
+            sb.AppendLine($"SetData(Det{d.ScreenNo}_AlarmSeverity, \"cMT\", LW, {d.LwAlarmSeverity}, 1) // 0 normal, 1 yellow, 2 orange, 3 red");
+            sb.AppendLine();
+        }
+        sb.AppendLine("end macro_command");
+        File.WriteAllText(Path.Combine(outputDir, "macros", "runtime-sampler.txt"), sb.ToString());
+    }
+
+    private static void WriteReadme(string outputDir, string cfgPath, Mx43Config cfg, DetectorPlan[] detectors)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("# Weintek Generator Output");
+        sb.AppendLine();
+        sb.AppendLine($"Source CFG: `{Path.GetFileName(cfgPath)}`");
+        sb.AppendLine($"Project name: `{cfg.ProjectName}`");
+        sb.AppendLine($"Detectors: `{detectors.Length}`");
+        sb.AppendLine();
+        sb.AppendLine("## Files");
+        sb.AppendLine();
+        sb.AppendLine("- `weintek-plan.json`: machine-readable plan for patching/building a cMT project.");
+        sb.AppendLine("- `detectors.csv`: detector order, Modbus addresses and local LW layout.");
+        sb.AppendLine("- `trend-channels.csv`: detector measurement/alarm channels intended for trend/data-sampling setup.");
+        sb.AppendLine("- `tags/mx43-tags.csv`: MX43-side tags (`info-Dn`, `meas-Dn`, `alarm-Dn`).");
+        sb.AppendLine("- `tags/local-lw-tags.csv`: local cMT LW tags used by generated macros and objects.");
+        sb.AppendLine("- `macros/config-extractor_*.txt`: reads the 68-register MX43 config block into local LW memory.");
+        sb.AppendLine("- `macros/runtime-sampler.txt`: periodically reads live measurements and alarm bits.");
+        sb.AppendLine("- `*.generated.cxob`: optional output when `--template-cxob` is used. This is a conservative template patch, not a full EasyBuilder compile.");
+        sb.AppendLine("- `*.template-report.md`: optional report describing the template's available fixed-width slots.");
+        sb.AppendLine("- `*.warnings.txt`: optional patch warnings; if present, the generated `.cxob` is partial.");
+        sb.AppendLine();
+        sb.AppendLine("## Decimal Handling");
+        sb.AppendLine();
+        sb.AppendLine("MX43 config offset `+38` is `DisplayFormat`. This generator treats it as decimal places:");
+        sb.AppendLine();
+        sb.AppendLine("- `0`: raw value is displayed as an integer, for example `100`.");
+        sb.AppendLine("- `1`: raw value is displayed with one decimal, for example `190` -> `19.0`.");
+        sb.AppendLine("- `2`: raw value is displayed with two decimals, for example `50` -> `0.50`.");
+        sb.AppendLine();
+        sb.AppendLine("Generated macros copy `DisplayFormat` into `DetN-DisplayFormat`. A Weintek numeric object can use fixed decimal places per generated detector, or a template patcher can create the correct numeric object variant per detector.");
+        sb.AppendLine();
+        sb.AppendLine("## Alarm Severity");
+        sb.AppendLine();
+        sb.AppendLine("`DetN-AlarmSeverity` is generated as a local color-driving value: `0=normal`, `1=yellow`, `2=orange`, `3=red`. If a detector only has Alarm 1 and Alarm 2 configured, Alarm 2 is treated as severity `3` so it becomes red without duplicating Alarm 2 into Alarm 3. If all three alarm levels exist, Alarm 1/2/3 remain yellow/orange/red.");
+        sb.AppendLine();
+        sb.AppendLine("## Trend Approach");
+        sb.AppendLine();
+        sb.AppendLine("Trend data should sample `DetN-Measurement` and display it with the same decimal setting as the detector value. The source cMT project already uses Weintek data sampling/trend concepts; this generator provides deterministic tag names and addresses so those objects can be generated or patched from a template.");
+        sb.AppendLine();
+        sb.AppendLine("## CXOB Patch Modes");
+        sb.AppendLine();
+        sb.AppendLine("Default `.cxob` patching preserves the original `project` payload length. This is the mode to use when the output must decompile in EasyBuilder with the template password, but too-short fields may be truncated or skipped with warnings.");
+        sb.AppendLine();
+        sb.AppendLine("`--allow-binary-expansion` can rebuild variable-length label/tag sections so longer labels and addresses fit. It is experimental and has been observed to trigger EasyBuilder password errors during decompile on password-protected templates.");
+        File.WriteAllText(Path.Combine(outputDir, "README.md"), sb.ToString());
+    }
+
+    private static void PatchCxobTemplate(string templateCxob, string outputCxob, DetectorPlan[] detectors, bool allowBinaryExpansion)
+    {
+        if (detectors.Length > 32)
+            throw new InvalidOperationException("The current cMT template patcher supports at most 32 detector label entries.");
+
+        string tempDir = Path.Combine(Path.GetTempPath(), "mx43-weintek-" + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            ExtractGzipTar(templateCxob, tempDir);
+            string projectPath = FindProjectPayloadPath(tempDir);
+            if (!File.Exists(projectPath)) throw new InvalidOperationException("Template CXOB does not contain a project payload.");
+
+            byte[] project = File.ReadAllBytes(projectPath);
+            var warnings = new List<string>();
+            TemplateReport report = AnalyzeTemplate(project, detectors);
+            if (allowBinaryExpansion)
+            {
+                project = ExpandDetectorLabelsIfNeeded(project, detectors, warnings);
+                project = ExpandInfoTagAddressFieldsIfNeeded(project, detectors, warnings);
+            }
+            else
+            {
+                warnings.Add("Binary expansion disabled; CXOB patch preserves original project payload length for EasyBuilder password/decompile compatibility.");
+            }
+            PatchDetectorLabels(project, detectors, warnings);
+            PatchInfoTags(project, detectors, warnings);
+            File.WriteAllBytes(projectPath, project);
+
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputCxob)) ?? Directory.GetCurrentDirectory());
+            RepackGzipTar(tempDir, outputCxob);
+
+            string warningPath = Path.ChangeExtension(outputCxob, ".warnings.txt");
+            string reportPath = Path.ChangeExtension(outputCxob, ".template-report.md");
+            File.WriteAllText(reportPath, RenderTemplateReport(report));
+            Console.WriteLine($"Template report written to: {reportPath}");
+            if (warnings.Count > 0)
+            {
+                File.WriteAllLines(warningPath, warnings.Distinct(StringComparer.Ordinal));
+                Console.WriteLine($"Template patch warnings written to: {warningPath}");
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, recursive: true); }
+            catch { /* best effort cleanup */ }
+        }
+    }
+
+    private static string FindProjectPayloadPath(string cxobRoot)
+    {
+        string rootProject = Path.Combine(cxobRoot, "project");
+        if (File.Exists(rootProject)) return rootProject;
+
+        string mt8000Project = Path.Combine(cxobRoot, "mt8000", "project");
+        if (File.Exists(mt8000Project)) return mt8000Project;
+
+        return rootProject;
+    }
+
+    private static byte[] ExpandInfoTagAddressFieldsIfNeeded(byte[] project, DetectorPlan[] detectors, List<string> warnings)
+    {
+        var tags = ParseTags(project).ToArray();
+        bool needsExpansion = false;
+        foreach (var d in detectors)
+        {
+            var tag = tags.FirstOrDefault(t => t.Name == $"info-D{d.ScreenNo}");
+            if (tag is null) continue;
+            if (d.ConfigRegister.ToString(CultureInfo.InvariantCulture).Length + 1 > tag.AddressFieldLength)
+            {
+                needsExpansion = true;
+                break;
+            }
+        }
+
+        if (!needsExpansion) return project;
+
+        byte[] marker = Encoding.ASCII.GetBytes("ENHANCEDTAGS_L32");
+        byte[] macroMarker = Encoding.ASCII.GetBytes("MACRO_ID");
+        byte[] tagDataMarker = Encoding.ASCII.GetBytes("TAG_DATA");
+        int tableStart = IndexOf(project, marker);
+        int oldMacroOffset = IndexOf(project, macroMarker);
+        int oldTagDataOffset = IndexOf(project, tagDataMarker);
+        if (tableStart < 0 || oldMacroOffset <= tableStart || oldTagDataOffset <= oldMacroOffset)
+        {
+            warnings.Add("Could not expand ENHANCEDTAGS_L32 safely; falling back to fixed-width tag patching.");
+            return project;
+        }
+
+        var detectorByInfoTag = detectors.ToDictionary(d => $"info-D{d.ScreenNo}", StringComparer.Ordinal);
+        using var rebuilt = new MemoryStream();
+        rebuilt.Write(marker);
+        rebuilt.Write(BitConverter.GetBytes(tags.Length));
+        foreach (var tag in tags)
+        {
+            string address = tag.Address;
+            if (detectorByInfoTag.TryGetValue(tag.Name, out var detector))
+                address = detector.ConfigRegister.ToString(CultureInfo.InvariantCulture);
+
+            byte[] nameBytes = Encoding.ASCII.GetBytes(tag.Name);
+            byte[] addressBytes = Encoding.ASCII.GetBytes(address);
+            int nameLen = nameBytes.Length + 1;
+            int addressLen = addressBytes.Length + 1;
+            if (nameLen > byte.MaxValue || addressLen > byte.MaxValue)
+                throw new InvalidOperationException($"Tag record too long after expansion: {tag.Name}");
+
+            rebuilt.WriteByte(tag.Flag);
+            rebuilt.WriteByte(tag.Class);
+            rebuilt.WriteByte(tag.Kind);
+            rebuilt.WriteByte((byte)nameLen);
+            rebuilt.WriteByte((byte)addressLen);
+            rebuilt.Write(nameBytes);
+            rebuilt.WriteByte(0);
+            rebuilt.Write(addressBytes);
+            rebuilt.WriteByte(0);
+        }
+
+        byte[] newTable = rebuilt.ToArray();
+        int oldTableLength = oldMacroOffset - tableStart;
+        int delta = newTable.Length - oldTableLength;
+        if (delta == 0) return project;
+
+        byte[] updated = new byte[project.Length + delta];
+        Buffer.BlockCopy(project, 0, updated, 0, tableStart);
+        Buffer.BlockCopy(newTable, 0, updated, tableStart, newTable.Length);
+        Buffer.BlockCopy(project, oldMacroOffset, updated, tableStart + newTable.Length, project.Length - oldMacroOffset);
+
+        int newMacroOffset = oldMacroOffset + delta;
+        int newTagDataOffset = oldTagDataOffset + delta;
+        ReplaceInt32(updated, oldMacroOffset, newMacroOffset);
+        ReplaceInt32(updated, oldTagDataOffset, newTagDataOffset);
+
+        warnings.Add($"Expanded ENHANCEDTAGS_L32 by {delta} byte(s) so info-D addresses can fit this CFG.");
+        return updated;
+    }
+
+    private static byte[] ExpandDetectorLabelsIfNeeded(byte[] project, DetectorPlan[] detectors, List<string> warnings)
+    {
+        var labels = ParseDetectorLabelSlots(project).ToArray();
+        if (labels.Length == 0) return project;
+
+        bool needsExpansion = false;
+        foreach (var d in detectors.Take(labels.Length))
+        {
+            int required = Encoding.UTF8.GetByteCount(SanitizeLabelText(d.Label));
+            var slot = labels.FirstOrDefault(l => l.Slot == d.ScreenNo);
+            if (slot is not null && required > slot.ValueLength)
+            {
+                needsExpansion = true;
+                break;
+            }
+        }
+
+        if (!needsExpansion) return project;
+
+        byte[] tagMarker = Encoding.ASCII.GetBytes("ENHANCEDTAGS_L32");
+        byte[] macroMarker = Encoding.ASCII.GetBytes("MACRO_ID");
+        byte[] tagDataMarker = Encoding.ASCII.GetBytes("TAG_DATA");
+        int firstRecordStart = labels.Min(l => l.Offset);
+        int oldLabelsEnd = labels.Max(l => l.EndOffset);
+        int oldTagTableOffset = IndexOf(project, tagMarker);
+        int oldMacroOffset = IndexOf(project, macroMarker);
+        int oldTagDataOffset = IndexOf(project, tagDataMarker);
+        if (firstRecordStart < 0 || oldLabelsEnd <= firstRecordStart || oldTagTableOffset < oldLabelsEnd || oldMacroOffset <= oldTagTableOffset || oldTagDataOffset <= oldMacroOffset)
+        {
+            warnings.Add("Could not expand detector labels safely; falling back to fixed-width label patching.");
+            return project;
+        }
+
+        using var rebuilt = new MemoryStream();
+        foreach (var slot in labels.OrderBy(l => l.Slot))
+        {
+            string value = slot.Slot <= detectors.Length ? SanitizeLabelText(detectors[slot.Slot - 1].Label) : slot.Slot.ToString(CultureInfo.InvariantCulture);
+            byte[] keyBytes = Encoding.ASCII.GetBytes(slot.Key);
+            byte[] valueBytes = Encoding.UTF8.GetBytes(value);
+            byte[] suffixBytes = slot.Suffix;
+            if (keyBytes.Length > byte.MaxValue || valueBytes.Length > byte.MaxValue || suffixBytes.Length > byte.MaxValue)
+                throw new InvalidOperationException($"Detector label record too long: {slot.Key}");
+
+            rebuilt.WriteByte((byte)keyBytes.Length);
+            rebuilt.WriteByte((byte)valueBytes.Length);
+            rebuilt.WriteByte((byte)suffixBytes.Length);
+            rebuilt.Write(keyBytes);
+            rebuilt.Write(valueBytes);
+            rebuilt.Write(suffixBytes);
+        }
+
+        byte[] newLabels = rebuilt.ToArray();
+        int oldLabelsLength = oldLabelsEnd - firstRecordStart;
+        int delta = newLabels.Length - oldLabelsLength;
+        if (delta == 0) return project;
+
+        byte[] updated = new byte[project.Length + delta];
+        Buffer.BlockCopy(project, 0, updated, 0, firstRecordStart);
+        Buffer.BlockCopy(newLabels, 0, updated, firstRecordStart, newLabels.Length);
+        Buffer.BlockCopy(project, oldLabelsEnd, updated, firstRecordStart + newLabels.Length, project.Length - oldLabelsEnd);
+
+        ReplaceInt32(updated, oldMacroOffset, oldMacroOffset + delta);
+        ReplaceInt32(updated, oldTagDataOffset, oldTagDataOffset + delta);
+
+        warnings.Add($"Expanded detector label records by {delta} byte(s) so labels can fit this CFG. This experimental mode may fail EasyBuilder password/decompile checks.");
+        return updated;
+    }
+
+    private static TemplateReport AnalyzeTemplate(byte[] project, DetectorPlan[] detectors)
+    {
+        var tags = ParseTags(project).ToArray();
+        var labels = ParseDetectorLabelSlots(project).ToArray();
+        var warnings = new List<string>();
+        var infoTags = tags.Where(t => t.Name.StartsWith("info-D", StringComparison.Ordinal)).ToArray();
+        var trendTags = tags.Where(t => t.Name.StartsWith("Ch", StringComparison.Ordinal) && int.TryParse(t.Name.AsSpan(2), out _)).ToArray();
+
+        if (infoTags.Length < detectors.Length)
+            warnings.Add($"Template has {infoTags.Length} info-D tags but CFG has {detectors.Length} detectors.");
+        if (trendTags.Length < detectors.Length)
+            warnings.Add($"Template has {trendTags.Length} Ch trend/value tags but CFG has {detectors.Length} detectors.");
+        if (labels.Length < Math.Min(detectors.Length, 32))
+            warnings.Add($"Template has {labels.Length} detector label slots but CFG has {detectors.Length} detectors.");
+
+        foreach (var d in detectors)
+        {
+            var info = infoTags.FirstOrDefault(t => t.Name == $"info-D{d.ScreenNo}");
+            if (info is null)
+            {
+                warnings.Add($"Missing info-D{d.ScreenNo}; config block for '{d.Label}' cannot be patched into this template.");
+            }
+            else if (d.ConfigRegister.ToString(CultureInfo.InvariantCulture).Length + 1 > info.AddressFieldLength)
+            {
+                warnings.Add($"info-D{d.ScreenNo} address field is {info.AddressFieldLength - 1} chars; config register {d.ConfigRegister} does not fit.");
+            }
+
+            var label = labels.FirstOrDefault(l => l.Slot == d.ScreenNo);
+            if (label is null)
+            {
+                warnings.Add($"Missing Det-{d.ScreenNo} label slot for '{d.Label}'.");
+            }
+            else if (Encoding.ASCII.GetByteCount(ToAscii(d.Label)) > label.ValueLength)
+            {
+                warnings.Add($"Det-{d.ScreenNo} label slot is {label.ValueLength} chars; '{d.Label}' will be truncated.");
+            }
+        }
+
+        return new TemplateReport(tags, labels, warnings);
+    }
+
+    private static string RenderTemplateReport(TemplateReport report)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("# CXOB Template Report");
+        sb.AppendLine();
+        sb.AppendLine($"Tag records: `{report.Tags.Count}`");
+        sb.AppendLine($"Detector label slots: `{report.Labels.Count}`");
+        sb.AppendLine($"info-D tags: `{report.Tags.Count(t => t.Name.StartsWith("info-D", StringComparison.Ordinal))}`");
+        sb.AppendLine($"Ch trend/value tags: `{report.Tags.Count(t => t.Name.StartsWith("Ch", StringComparison.Ordinal) && int.TryParse(t.Name.AsSpan(2), out _))}`");
+        sb.AppendLine();
+
+        if (report.Warnings.Count > 0)
+        {
+            sb.AppendLine("## Warnings");
+            sb.AppendLine();
+            foreach (string warning in report.Warnings) sb.AppendLine($"- {warning}");
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("## info-D Tags");
+        sb.AppendLine();
+        sb.AppendLine("| Name | Address | Field chars | Offset |");
+        sb.AppendLine("|---|---:|---:|---:|");
+        foreach (var tag in report.Tags.Where(t => t.Name.StartsWith("info-D", StringComparison.Ordinal)).OrderBy(t => NaturalNumberSuffix(t.Name)))
+        {
+            sb.AppendLine($"| `{tag.Name}` | `{tag.Address}` | `{tag.AddressFieldLength - 1}` | `0x{tag.Offset:X}` |");
+        }
+
+        sb.AppendLine();
+        sb.AppendLine("## Trend/Value Tags");
+        sb.AppendLine();
+        sb.AppendLine("| Name | Address | Field chars | Offset |");
+        sb.AppendLine("|---|---:|---:|---:|");
+        foreach (var tag in report.Tags.Where(t => t.Name.StartsWith("Ch", StringComparison.Ordinal) && int.TryParse(t.Name.AsSpan(2), out _)).OrderBy(t => NaturalNumberSuffix(t.Name)))
+        {
+            sb.AppendLine($"| `{tag.Name}` | `{tag.Address}` | `{tag.AddressFieldLength - 1}` | `0x{tag.Offset:X}` |");
+        }
+
+        sb.AppendLine();
+        sb.AppendLine("## Detector Label Slots");
+        sb.AppendLine();
+        sb.AppendLine("| Slot | Key | Current value | Value chars | Offset |");
+        sb.AppendLine("|---:|---|---|---:|---:|");
+        foreach (var label in report.Labels)
+        {
+            sb.AppendLine($"| {label.Slot} | `{label.Key}` | `{label.Value.TrimEnd()}` | `{label.ValueLength}` | `0x{label.Offset:X}` |");
+        }
+
+        return sb.ToString();
+    }
+
+    private static int NaturalNumberSuffix(string name)
+    {
+        int i = name.Length - 1;
+        while (i >= 0 && char.IsDigit(name[i])) i--;
+        return int.TryParse(name.AsSpan(i + 1), NumberStyles.None, CultureInfo.InvariantCulture, out int n) ? n : int.MaxValue;
+    }
+
+    private static IEnumerable<TagRecord> ParseTags(byte[] project)
+    {
+        byte[] marker = Encoding.ASCII.GetBytes("ENHANCEDTAGS_L32");
+        int markerOffset = IndexOf(project, marker);
+        if (markerOffset < 0) yield break;
+
+        int countOffset = markerOffset + marker.Length;
+        if (countOffset + 4 > project.Length) yield break;
+
+        int count = BitConverter.ToInt32(project, countOffset);
+        int off = countOffset + 4;
+        for (int record = 0; record < count && off + 5 <= project.Length; record++)
+        {
+            int nameLen = project[off + 3];
+            int addrLen = project[off + 4];
+            int nameOffset = off + 5;
+            int addrOffset = nameOffset + nameLen;
+            int next = addrOffset + addrLen;
+            if (next > project.Length) yield break;
+
+            yield return new TagRecord(
+                off,
+                project[off],
+                project[off + 1],
+                project[off + 2],
+                ReadNullTerminatedAscii(project, nameOffset, nameLen),
+                ReadNullTerminatedAscii(project, addrOffset, addrLen),
+                nameLen,
+                addrLen);
+            off = next;
+        }
+    }
+
+    private static IEnumerable<DetectorLabelSlot> ParseDetectorLabelSlots(byte[] project)
+    {
+        int det1 = IndexOf(project, Encoding.ASCII.GetBytes("Det-1"));
+        if (det1 < 3) yield break;
+
+        int recordStart = det1 - 3;
+        for (int slot = 1; slot <= 32; slot++)
+        {
+            if (recordStart + 3 > project.Length) yield break;
+            int keyLen = project[recordStart];
+            int valueLen = project[recordStart + 1];
+            int suffixLen = project[recordStart + 2];
+            int keyOffset = recordStart + 3;
+            int valueOffset = keyOffset + keyLen;
+            int suffixOffset = valueOffset + valueLen;
+            int next = suffixOffset + suffixLen;
+            if (next > project.Length) yield break;
+
+            string key = Encoding.ASCII.GetString(project, keyOffset, keyLen);
+            if (!key.Equals($"Det-{slot}", StringComparison.Ordinal)) yield break;
+            string value = Encoding.ASCII.GetString(project, valueOffset, valueLen);
+            byte[] suffix = project[suffixOffset..next];
+            yield return new DetectorLabelSlot(recordStart, next, slot, key, value, valueLen, suffix);
+            recordStart = next;
+        }
+    }
+
+    private static void ExtractGzipTar(string gzipTarPath, string outputDir)
+    {
+        using var file = File.OpenRead(gzipTarPath);
+        using var gzip = new GZipStream(file, CompressionMode.Decompress);
+        using var reader = new TarReader(gzip);
+        TarEntry? entry;
+        while ((entry = reader.GetNextEntry()) is not null)
+        {
+            string name = NormalizeTarPath(entry.Name);
+            string target = Path.GetFullPath(Path.Combine(outputDir, name));
+            string outputRoot = Path.GetFullPath(outputDir);
+            string rootWithSeparator = outputRoot + Path.DirectorySeparatorChar;
+            if (!target.Equals(outputRoot, StringComparison.Ordinal) && !target.StartsWith(rootWithSeparator, StringComparison.Ordinal))
+                throw new InvalidOperationException($"Unsafe tar entry path: {entry.Name}");
+
+            if (entry.EntryType == TarEntryType.Directory)
+            {
+                Directory.CreateDirectory(target);
+                continue;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(target) ?? outputDir);
+            if (entry.DataStream is null)
+            {
+                File.WriteAllBytes(target, Array.Empty<byte>());
+                continue;
+            }
+
+            using var output = File.Create(target);
+            entry.DataStream.CopyTo(output);
+        }
+    }
+
+    private static string NormalizeTarPath(string path)
+    {
+        while (path.StartsWith("./", StringComparison.Ordinal)) path = path[2..];
+        return path.Replace('/', Path.DirectorySeparatorChar);
+    }
+
+    private static void RepackGzipTar(string sourceDir, string outputCxob)
+    {
+        string tarPath = Path.Combine(Path.GetTempPath(), "mx43-weintek-" + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture) + ".tar");
+        try
+        {
+            if (File.Exists(outputCxob)) File.Delete(outputCxob);
+            TarFile.CreateFromDirectory(sourceDir, tarPath, includeBaseDirectory: false);
+            using var tar = File.OpenRead(tarPath);
+            using var output = File.Create(outputCxob);
+            using var gzip = new GZipStream(output, CompressionLevel.SmallestSize);
+            tar.CopyTo(gzip);
+        }
+        finally
+        {
+            try { if (File.Exists(tarPath)) File.Delete(tarPath); }
+            catch { /* best effort cleanup */ }
+        }
+    }
+
+    private static void PatchDetectorLabels(byte[] project, DetectorPlan[] detectors, List<string> warnings)
+    {
+        int det1 = IndexOf(project, Encoding.ASCII.GetBytes("Det-1"));
+        if (det1 < 3)
+        {
+            warnings.Add("Could not locate Det-1 label-library entry; detector labels were not patched.");
+            return;
+        }
+
+        int recordStart = det1 - 3;
+        for (int slot = 1; slot <= 32; slot++)
+        {
+            if (recordStart + 3 > project.Length)
+            {
+                warnings.Add($"Label table ended before slot {slot}.");
+                return;
+            }
+
+            int keyLen = project[recordStart];
+            int valueLen = project[recordStart + 1];
+            int suffixLen = project[recordStart + 2];
+            int keyOffset = recordStart + 3;
+            int valueOffset = keyOffset + keyLen;
+            int suffixOffset = valueOffset + valueLen;
+            int next = suffixOffset + suffixLen;
+            if (next > project.Length)
+            {
+                warnings.Add($"Invalid label-library entry at slot {slot}.");
+                return;
+            }
+
+            string expectedKey = slot <= 9 ? $"Det-{slot}" : $"Det-{slot}";
+            string key = Encoding.ASCII.GetString(project, keyOffset, keyLen);
+            if (!key.Equals(expectedKey, StringComparison.Ordinal))
+            {
+                warnings.Add($"Unexpected label key at slot {slot}: '{key}', expected '{expectedKey}'. Stopped label patching.");
+                return;
+            }
+
+            string label = slot <= detectors.Length ? detectors[slot - 1].Label : slot.ToString(CultureInfo.InvariantCulture);
+            WriteFixedAscii(project, valueOffset, valueLen, label, warnings, $"label Det-{slot}");
+            recordStart = next;
+        }
+    }
+
+    private static void PatchInfoTags(byte[] project, DetectorPlan[] detectors, List<string> warnings)
+    {
+        byte[] marker = Encoding.ASCII.GetBytes("ENHANCEDTAGS_L32");
+        int markerOffset = IndexOf(project, marker);
+        if (markerOffset < 0)
+        {
+            warnings.Add("Could not locate ENHANCEDTAGS_L32; info-D tags were not patched.");
+            return;
+        }
+
+        int countOffset = markerOffset + marker.Length;
+        if (countOffset + 4 > project.Length)
+        {
+            warnings.Add("Could not read tag count after ENHANCEDTAGS_L32.");
+            return;
+        }
+        int count = BitConverter.ToInt32(project, countOffset);
+        int off = countOffset + 4;
+        bool[] seenInfoTags = new bool[Math.Max(detectors.Length, 32) + 1];
+        for (int record = 0; record < count && off + 5 <= project.Length; record++)
+        {
+            int nameLen = project[off + 3];
+            int addrLen = project[off + 4];
+            int nameOffset = off + 5;
+            int addrOffset = nameOffset + nameLen;
+            int next = addrOffset + addrLen;
+            if (next > project.Length) break;
+
+            string name = ReadNullTerminatedAscii(project, nameOffset, nameLen);
+            if (name.StartsWith("info-D", StringComparison.Ordinal) && int.TryParse(name.AsSpan(6), NumberStyles.None, CultureInfo.InvariantCulture, out int n))
+            {
+                if (n >= 1 && n < seenInfoTags.Length) seenInfoTags[n] = true;
+                if (n >= 1 && n <= detectors.Length)
+                {
+                    WriteFixedNullTerminatedAscii(project, addrOffset, addrLen, detectors[n - 1].ConfigRegister.ToString(CultureInfo.InvariantCulture), warnings, name);
+                }
+                else if (n >= 1 && n <= 32)
+                {
+                    WriteFixedNullTerminatedAscii(project, addrOffset, addrLen, "0", warnings, name);
+                }
+            }
+
+            off = next;
+        }
+
+        for (int n = 1; n <= detectors.Length; n++)
+        {
+            if (!seenInfoTags[n]) warnings.Add($"Template has no info-D{n} tag; detector {n} cannot be configured by this patched CXOB template.");
+        }
+    }
+
+    private static int IndexOf(byte[] haystack, byte[] needle)
+    {
+        for (int i = 0; i <= haystack.Length - needle.Length; i++)
+        {
+            int j = 0;
+            for (; j < needle.Length; j++) if (haystack[i + j] != needle[j]) break;
+            if (j == needle.Length) return i;
+        }
+        return -1;
+    }
+
+    private static string ReadNullTerminatedAscii(byte[] data, int offset, int length)
+    {
+        int actual = 0;
+        while (actual < length && data[offset + actual] != 0) actual++;
+        return Encoding.ASCII.GetString(data, offset, actual);
+    }
+
+    private static void WriteFixedNullTerminatedAscii(byte[] data, int offset, int length, string value, List<string> warnings, string field)
+    {
+        if (length == 0) return;
+        byte[] bytes = Encoding.ASCII.GetBytes(value);
+        if (bytes.Length + 1 > length)
+        {
+            warnings.Add($"Skipped {field}: value '{value}' does not fit in fixed {length - 1}-byte tag address field.");
+            return;
+        }
+        Array.Clear(data, offset, length);
+        Array.Copy(bytes, 0, data, offset, bytes.Length);
+    }
+
+    private static void WriteFixedAscii(byte[] data, int offset, int length, string value, List<string> warnings, string field)
+    {
+        byte[] bytes = Encoding.ASCII.GetBytes(ToAscii(value));
+        if (bytes.Length > length)
+        {
+            warnings.Add($"Truncated {field}: '{value}' to {length} byte(s).");
+            Array.Copy(bytes, 0, data, offset, length);
+            return;
+        }
+
+        for (int i = 0; i < length; i++) data[offset + i] = (byte)' ';
+        Array.Copy(bytes, 0, data, offset, bytes.Length);
+    }
+
+    private static void ReplaceInt32(byte[] data, int oldValue, int newValue)
+    {
+        byte[] oldBytes = BitConverter.GetBytes(oldValue);
+        byte[] newBytes = BitConverter.GetBytes(newValue);
+        for (int i = 0; i <= data.Length - 4; i++)
+        {
+            if (data[i] == oldBytes[0] && data[i + 1] == oldBytes[1] && data[i + 2] == oldBytes[2] && data[i + 3] == oldBytes[3])
+            {
+                Buffer.BlockCopy(newBytes, 0, data, i, 4);
+            }
+        }
+    }
+
+    private static string ToAscii(string text)
+    {
+        var sb = new StringBuilder(text.Length);
+        foreach (char c in text)
+        {
+            sb.Append(c is >= ' ' and <= '~' ? c : '?');
+        }
+        return sb.ToString();
+    }
+
+    private static string SanitizeLabelText(string text) => ToAscii(text);
+
+    private sealed record DetectorPlan(
+        int ScreenNo,
+        int Line,
+        int Detector,
+        int AnalogChannel,
+        string Label,
+        string Unit,
+        string ShortGasName,
+        int RangeRaw,
+        int DisplayFormat,
+        int ScaleDivisor,
+        int AlarmLevelCount,
+        int HighestConfiguredAlarmBit,
+        int ConfigRegister,
+        int MeasurementRegister,
+        int AlarmRegister,
+        int LwBase,
+        int LwName,
+        int LwStatus,
+        int LwFullGas,
+        int LwRange,
+        int LwDisplayFormat,
+        int LwUnit,
+        int LwShortGas,
+        int LwAlarm1,
+        int LwAlarm2,
+        int LwAlarm3,
+        int LwMeasurement,
+        int LwAlarmBits,
+        int LwScaledInteger,
+        int LwScaleDivisor,
+        int LwAlarmLevelCount,
+        int LwAlarmSeverity)
+    {
+        public static DetectorPlan From(Sensor sensor, int screenNo)
+        {
+            int lwBase = screenNo * LwStride;
+            int displayFormat = Math.Clamp(sensor.DisplayFormat, 0, 4);
+            int scaleDivisor = (int)Math.Pow(10, displayFormat);
+            int highestConfiguredAlarmBit = ComputeHighestConfiguredAlarmBit(sensor);
+            int alarmLevelCount = highestConfiguredAlarmBit;
+            return new DetectorPlan(
+                screenNo,
+                sensor.Line,
+                sensor.Detector,
+                sensor.AnalogChannel,
+                sensor.Label,
+                sensor.Unit,
+                sensor.ShortGasName,
+                sensor.Range,
+                sensor.DisplayFormat,
+                scaleDivisor,
+                alarmLevelCount,
+                highestConfiguredAlarmBit,
+                Mx43AddressMap.ConfigBaseFor(sensor),
+                Mx43AddressMap.MeasurementRegFor(sensor),
+                Mx43AddressMap.AlarmRegFor(sensor),
+                lwBase,
+                lwBase + LwNameOffset,
+                lwBase + LwStatusOffset,
+                lwBase + LwFullGasOffset,
+                lwBase + LwRangeOffset,
+                lwBase + LwDisplayFormatOffset,
+                lwBase + LwUnitOffset,
+                lwBase + LwShortGasOffset,
+                lwBase + LwAlarm1Offset,
+                lwBase + LwAlarm2Offset,
+                lwBase + LwAlarm3Offset,
+                lwBase + LwMeasurementOffset,
+                lwBase + LwAlarmBitsOffset,
+                lwBase + LwScaledIntegerOffset,
+                lwBase + LwScaleDivisorOffset,
+                lwBase + LwAlarmLevelCountOffset,
+                lwBase + LwAlarmSeverityOffset);
+        }
+
+        private static int ComputeHighestConfiguredAlarmBit(Sensor sensor)
+        {
+            if (sensor.Thresholds.Inst3 != 0) return 3;
+            if (sensor.Thresholds.Inst2 != 0) return 2;
+            if (sensor.Thresholds.Inst1 != 0) return 1;
+            return 0;
+        }
+    }
+
+    private sealed record TagRecord(int Offset, byte Flag, byte Class, byte Kind, string Name, string Address, int NameFieldLength, int AddressFieldLength);
+
+    private sealed record DetectorLabelSlot(int Offset, int EndOffset, int Slot, string Key, string Value, int ValueLength, byte[] Suffix);
+
+    private sealed record TemplateReport(IReadOnlyList<TagRecord> Tags, IReadOnlyList<DetectorLabelSlot> Labels, IReadOnlyList<string> Warnings);
+
+    private static void AppendCsv(this StringBuilder sb, object? value, bool last = false)
+    {
+        string text = Convert.ToString(value, CultureInfo.InvariantCulture) ?? "";
+        bool quote = text.Contains(',') || text.Contains('"') || text.Contains('\n') || text.Contains('\r');
+        if (quote)
+        {
+            sb.Append('"');
+            sb.Append(text.Replace("\"", "\"\"", StringComparison.Ordinal));
+            sb.Append('"');
+        }
+        else
+        {
+            sb.Append(text);
+        }
+        if (!last) sb.Append(',');
+    }
+}
