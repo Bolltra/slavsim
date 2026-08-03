@@ -42,11 +42,14 @@ public sealed class Mx43Simulator
             int idx = s.Index;
             if (idx >= 0 && idx < _store.Detectors.Length) _store.Detectors[idx].Config = s;
         }
-        // Start with a clean measurement at zero and recompute alarms
-        // for whatever thresholds the .cfg says.
+        // Oxygen detectors start at normal atmospheric concentration (21.0%).
+        // Other detectors start at zero, with no active alarms.
         foreach (var d in _store.Detectors)
         {
-            d.Measurement = 0;
+            d.Measurement = d.Config is { ShortGasName: var gas } &&
+                            string.Equals(gas, "O2", StringComparison.OrdinalIgnoreCase)
+                ? (short)210
+                : (short)0;
             d.ActiveAlarms = AlarmBits.None;
         }
         Repack();
@@ -125,7 +128,7 @@ public sealed class Mx43Simulator
     /// <summary>
     /// Derive the active alarm bits from the configured thresholds.
     /// MX43 semantics:
-    ///   - Alarm 1/2/3 latch when |value| crosses the instantaneous or averaged threshold
+    ///   - Alarm 1/2/3 follow each threshold's configured rising/falling direction
     ///   - Underscale / Overscale latch when value reaches or passes the scale threshold
     ///   - OutOfRange latches when value reaches or exceeds OutOfRange threshold
     ///   - Fault latches together with OutOfRange
@@ -138,12 +141,12 @@ public sealed class Mx43Simulator
         int v = d.Measurement;
         AlarmBits b = AlarmBits.None;
 
-        if (c.Thresholds.Inst1 != 0 && System.Math.Abs(v) >= c.Thresholds.Inst1) b |= AlarmBits.Inst1;
-        if (c.Thresholds.Inst2 != 0 && System.Math.Abs(v) >= c.Thresholds.Inst2) b |= AlarmBits.Inst2;
-        if (c.Thresholds.Inst3 != 0 && System.Math.Abs(v) >= c.Thresholds.Inst3) b |= AlarmBits.Inst3;
-        if (c.Thresholds.Avg1  != 0 && System.Math.Abs(v) >= c.Thresholds.Avg1)  b |= AlarmBits.Inst1;
-        if (c.Thresholds.Avg2  != 0 && System.Math.Abs(v) >= c.Thresholds.Avg2)  b |= AlarmBits.Inst2;
-        if (c.Thresholds.Avg3  != 0 && System.Math.Abs(v) >= c.Thresholds.Avg3)  b |= AlarmBits.Inst3;
+        if (ThresholdCrossed(v, c.Thresholds.Inst1, c.EdgeFlags, AlarmEdge.Inst1)) b |= AlarmBits.Inst1;
+        if (ThresholdCrossed(v, c.Thresholds.Inst2, c.EdgeFlags, AlarmEdge.Inst2)) b |= AlarmBits.Inst2;
+        if (ThresholdCrossed(v, c.Thresholds.Inst3, c.EdgeFlags, AlarmEdge.Inst3)) b |= AlarmBits.Inst3;
+        if (ThresholdCrossed(v, c.Thresholds.Avg1,  c.EdgeFlags, AlarmEdge.Avg1))  b |= AlarmBits.Inst1;
+        if (ThresholdCrossed(v, c.Thresholds.Avg2,  c.EdgeFlags, AlarmEdge.Avg2))  b |= AlarmBits.Inst2;
+        if (ThresholdCrossed(v, c.Thresholds.Avg3,  c.EdgeFlags, AlarmEdge.Avg3))  b |= AlarmBits.Inst3;
 
         if (c.Thresholds.Underscale != 0 && v <= c.Thresholds.Underscale) b |= AlarmBits.Underscale;
         if (c.Thresholds.Overscale  != 0 && v >= c.Thresholds.Overscale)  b |= AlarmBits.Overscale;
@@ -164,4 +167,7 @@ public sealed class Mx43Simulator
         b = (b & enabled) | (b & (AlarmBits.Underscale | AlarmBits.Overscale | AlarmBits.Fault | AlarmBits.OutOfRange));
         return b;
     }
+
+    private static bool ThresholdCrossed(int value, int threshold, AlarmEdge edges, AlarmEdge alarm)
+        => threshold != 0 && ((edges & alarm) != 0 ? value >= threshold : value <= threshold);
 }

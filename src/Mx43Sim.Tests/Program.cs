@@ -61,6 +61,7 @@ internal static class Program
             TestConfigVirtualRead();
             TestModbusServer();
             TestSimulator();
+            TestAlarmDirections();
             TestEndToEnd();
             TestLineAssignment();
             TestLineAssignmentAllFiles();
@@ -307,6 +308,53 @@ internal static class Program
         sim.SetMeasurement(line, det, 0);
         Assert("back to 0: no alarm", (ushort)store.ReadRegU(alarmReg), (ushort)0);
 
+        return 0;
+    }
+
+    private static int TestAlarmDirections()
+    {
+        var cfg = new Mx43Config();
+        cfg.Sensors.Add(new Sensor
+        {
+            Line = 1,
+            Detector = 1,
+            ShortGasName = "CH4",
+            Thresholds = new AlarmThresholds { Inst1 = 20 },
+            EnableFlags = AlarmEnable.Inst1,
+            EdgeFlags = AlarmEdge.Inst1,
+        });
+        cfg.Sensors.Add(new Sensor
+        {
+            Line = 1,
+            Detector = 2,
+            ShortGasName = "O2",
+            DisplayFormat = 1,
+            Thresholds = new AlarmThresholds { Inst1 = 190, Inst2 = 170 },
+            EnableFlags = AlarmEnable.Inst1 | AlarmEnable.Inst2,
+            EdgeFlags = AlarmEdge.None,
+        });
+
+        var store = new Mx43RegisterStore();
+        var sim = new Mx43Simulator(store);
+        sim.Load(cfg);
+
+        Assert("CH4 starts at 0", sim.GetMeasurement(1, 1), (short)0);
+        Assert("O2 starts at 210", sim.GetMeasurement(1, 2), (short)210);
+        Assert("O2 start register = 210", store.ReadReg(Mx43AddressMap.MeasurementRegFor(1, 2)), (short)210);
+
+        sim.SetMeasurement(1, 1, 19);
+        Assert("rising alarm below threshold is clear", (ushort)sim.GetAlarm(1, 1), (ushort)0);
+        sim.SetMeasurement(1, 1, 20);
+        Assert("rising alarm at threshold is set", (ushort)sim.GetAlarm(1, 1), (ushort)AlarmBits.Inst1);
+
+        sim.SetMeasurement(1, 2, 191);
+        Assert("falling O2 alarm above threshold is clear", (ushort)sim.GetAlarm(1, 2), (ushort)0);
+        sim.SetMeasurement(1, 2, 190);
+        Assert("falling O2 alarm 1 at threshold is set", (ushort)sim.GetAlarm(1, 2), (ushort)AlarmBits.Inst1);
+        sim.SetMeasurement(1, 2, 170);
+        Assert("falling O2 alarms 1+2 are set", (ushort)sim.GetAlarm(1, 2), (ushort)(AlarmBits.Inst1 | AlarmBits.Inst2));
+        sim.SetMeasurement(1, 2, 210);
+        Assert("falling O2 alarms clear at normal level", (ushort)sim.GetAlarm(1, 2), (ushort)0);
         return 0;
     }
 
