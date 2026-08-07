@@ -47,13 +47,14 @@ Generated output:
 - `tags/local-lw-tags.csv`: local cMT LW tags.
 - `macros/config-extractor_*.txt`: Weintek macro text that reads 68-register config blocks and stores label/range/unit/alarm/display-format fields in LW.
 - `macros/runtime-sampler.txt`: Weintek macro text that samples live measurement and alarm bits.
+- `macros/*.ebm`: directly importable EasyBuilder Pro 6.10.02 macro files with UTF-8 BOM, CRLF and execution metadata. Extractor IDs `5,7,8,9` are always emitted; unused ranges are disabled no-op replacements so stale template macros stop polling zero addresses.
 - `*.generated.cxob`: only when `--template-cxob` is used.
 - `*.template-report.md`: describes the template's available `info-Dn`, `ChN` and label slots.
 - `*.warnings.txt`: patch notices and warnings. Expansion notices are informational; skipped, missing or truncated fields mean the `.cxob` is partial.
 
 The `.cxob` output is a patch of an existing working template. It does not compile a new EasyBuilder project. It patches the stable structures mapped so far:
 
-- Detector label-library entries `Det-1..Det-32`.
+- Existing detector label-library entries `Det-1..Det-32` when present. EasyBuilder removes detached entries during compile, so referenced screen/local-LW objects remain the authoritative display-name path.
 - Existing `info-Dn` MX43 config-tag addresses.
 - Optional variable-length rebuilds of the detector label records and `ENHANCEDTAGS_L32` table when `--allow-binary-expansion` is used, including project block lengths, mapped relocation metadata and the macro/TAG_DATA link.
 
@@ -61,7 +62,7 @@ It intentionally does not add new EasyBuilder objects, trend objects, macros or 
 
 The `Start.cxob` layout uses `mt8000/project` and has 32 detector labels, 32 `ChN` tags and 32 `info-Dn` tags. With `--allow-binary-expansion`, the patcher can expand its short placeholder fields so digital config registers such as `33..48` and analog config registers `257..264` fit.
 
-Rule of thumb: if EasyBuilder decompile is the goal, start without `--allow-binary-expansion` and use password `111111` when prompted by templates that require it. Repacking `Start.cxob` unchanged and the default length-preserving patch have both been verified to decompile. Earlier expanded files failed with an EasyBuilder password error and were subsequently confirmed to have inconsistent project block lengths and internal relocation pointers; the generator now updates and validates those mapped structures. Expanded output still requires a new EasyBuilder decompile/offline-simulator check because the complete proprietary format is not documented. Warnings that say a field could not be located, did not fit, or was skipped mean the `.cxob` should be treated as partial.
+Rule of thumb: if EasyBuilder decompile is the goal, start without `--allow-binary-expansion` and use password `111111` when prompted by templates that require it. Repacking `Start.cxob` unchanged and the default length-preserving patch have both been verified to decompile. Corrected expanded digital and analog files have now also completed an EasyBuilder 6.10.02 decompile/full-compile round trip while preserving all active `info-Dn` addresses. Offline runtime behavior still requires validation because macros, objects and Data Sampling configuration are template-owned. Warnings that say a field could not be located, did not fit, or was skipped mean the `.cxob` should be treated as partial.
 
 ## CXOB Strategy
 
@@ -74,7 +75,7 @@ The safest incremental path is:
 3. Compile the template to `.cxob` in EasyBuilder Pro.
 4. Later, build a patcher that updates the decompiled/template `project` payload directly once the needed structures are mapped.
 
-Public documentation shows import/export support for Address Tag Library CSV/Excel, Label Tag Library CSV/Excel/`.lbl`, and macro import/export (`.edm`/macro libraries). The exact Address Tag CSV columns are driver- and version-dependent, so the generated tag CSV files are manifests until matched to a representative export from the target template. Macro Manager imports `.edm`; generated `.txt` files are source for review/paste unless wrapped in an EasyBuilder-exported EDM template. No documented command-line compiler for `.cmtp` -> `.cxob` was found; EasyBuilder Pro owns that supported step.
+Public documentation shows import/export support for Address Tag Library CSV/Excel and Label Tag Library CSV/Excel/`.lbl`. The received `used_addresses_list.xls` files are usage reports, not importable Address Tag Library exports, so the generated tag CSV files remain manifests until matched to a representative Address Tag Library CSV. EasyBuilder Pro 6.10.02 exports macros as plain-text `.ebm` files; the generator now emits that verified format alongside review-friendly `.txt`. No documented command-line compiler for `.cmtp` -> `.cxob` was found; EasyBuilder Pro owns that supported step.
 
 The verified binary structures and relocation rules are documented in `weintek-project-format.md`.
 

@@ -401,6 +401,20 @@ internal static class Program
         Assert("Weintek three-level alarm 2 is orange", macro.Contains(
             "else if (Det3_AlarmBits & 0x0002) <> 0 then\n    Det3_AlarmSeverity = 2", StringComparison.Ordinal), true);
 
+        string ebm = MacroGenerator.RenderEbm(10, "Runtime Sampler", startup: true, periodicInterval: 10, macro);
+        byte[] ebmBytes = MacroGenerator.EncodeEbm(ebm);
+        Assert("Weintek EBM contains metadata", ebm.StartsWith(
+            "macro_definition_begin\r\n    \"id\": \"10\"\r\n    \"name\": \"Runtime Sampler\"", StringComparison.Ordinal), true);
+        Assert("Weintek EBM separates metadata and source", ebm.Contains(
+            "macro_definition_end\r\n\r\nmacro_command main()", StringComparison.Ordinal), true);
+        Assert("Weintek EBM uses CRLF", HasBareLineFeed(ebm), false);
+        Assert("Weintek EBM has no terminal newline", ebm.EndsWith('\n'), false);
+        Assert("Weintek EBM has UTF-8 BOM", ebmBytes.AsSpan(0, 3).SequenceEqual(new byte[] { 0xEF, 0xBB, 0xBF }), true);
+        string disabledEbm = MacroGenerator.RenderEbm(9, "Info Extractor 25-32", startup: false, periodicInterval: null,
+            "macro_command main()\n\nend macro_command\n");
+        Assert("Weintek disabled EBM is non-periodic", disabledEbm.Contains(
+            "\"startup\": \"false\"\r\n    \"periodic\": [ \"false\" ]", StringComparison.Ordinal), true);
+
         var patchCfg = new Mx43Config();
         patchCfg.Sensors.Add(new Sensor
         {
@@ -433,6 +447,16 @@ internal static class Program
         Assert("Weintek source buffer remains unchanged", IndexOf(source, Encoding.UTF8.GetBytes("Vägg O2")) < 0, true);
         Assert("Weintek expansion changed macro offset", newMacroOffset > oldMacroOffset, true);
         Assert("Weintek expansion changed TAG_DATA offset", newTagDataOffset > oldTagDataOffset, true);
+
+        byte[] normalizedSource = BuildSyntheticWeintekProject(
+            out _, out _, out _, includeDetectorLabels: false);
+        var normalizedPatch = Mx43Sim.WeintekGenerator.Program.PatchProjectPayload(
+            normalizedSource, patchPlans, allowBinaryExpansion: true);
+        Assert("Weintek normalized label library remains valid", normalizedPatch.Project.Length > normalizedSource.Length, true);
+        Assert("Weintek normalized project reports unpatchable labels", normalizedPatch.Warnings.Any(
+            warning => warning.Contains("no Det-N", StringComparison.Ordinal)), true);
+        Assert("Weintek normalized project still patches tags", IndexOf(
+            normalizedPatch.Project, Encoding.ASCII.GetBytes("257\0")) >= 0, true);
         return 0;
     }
 
@@ -446,18 +470,26 @@ internal static class Program
             EnableFlags = enabled,
         };
 
-    private static byte[] BuildSyntheticWeintekProject(out int macroOffset, out int tagDataOffset, out int unrelatedPointerOffset)
+    private static byte[] BuildSyntheticWeintekProject(
+        out int macroOffset,
+        out int tagDataOffset,
+        out int unrelatedPointerOffset,
+        bool includeDetectorLabels = true)
     {
         byte[] blockA = new byte[32];
         byte[] labels;
         using (var stream = new MemoryStream())
         using (var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true))
         {
-            writer.Write(Encoding.ASCII.GetBytes("LABE_LIB1"));
-            for (int slot = 1; slot <= 32; slot++)
+            writer.Write(Encoding.ASCII.GetBytes("LABE_LIB"));
+            writer.Write((ushort)(includeDetectorLabels ? 32 : 4));
+            int labelCount = includeDetectorLabels ? 32 : 4;
+            for (int slot = 1; slot <= labelCount; slot++)
             {
-                byte[] key = Encoding.ASCII.GetBytes($"Det-{slot}");
-                byte[] value = Encoding.ASCII.GetBytes(slot.ToString());
+                string keyText = includeDetectorLabels ? $"Det-{slot}" : $"Label_{slot}";
+                string valueText = includeDetectorLabels ? slot.ToString() : $"Page {slot}";
+                byte[] key = Encoding.ASCII.GetBytes(keyText);
+                byte[] value = Encoding.ASCII.GetBytes(valueText);
                 writer.Write((byte)key.Length);
                 writer.Write((byte)value.Length);
                 writer.Write((byte)0);
@@ -531,6 +563,15 @@ internal static class Program
         int count = 0;
         for (int offset = 0; (offset = text.IndexOf(value, offset, StringComparison.Ordinal)) >= 0; offset += value.Length) count++;
         return count;
+    }
+
+    private static bool HasBareLineFeed(string text)
+    {
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (text[i] == '\n' && (i == 0 || text[i - 1] != '\r')) return true;
+        }
+        return false;
     }
 
     private static int IndexOf(byte[] data, string value) => IndexOf(data, Encoding.ASCII.GetBytes(value));

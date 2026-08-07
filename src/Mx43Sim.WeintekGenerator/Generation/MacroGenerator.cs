@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -8,19 +9,39 @@ namespace Mx43Sim.WeintekGenerator;
 
 internal static class MacroGenerator
 {
+    private static readonly int[] ExtractorMacroIds = [5, 7, 8, 9];
+
     internal static void WriteConfigExtractors(string outputDir, IReadOnlyList<DetectorPlan> detectors)
     {
         string macroDirectory = Path.Combine(outputDir, "macros");
         foreach (string staleFile in Directory.GetFiles(macroDirectory, "config-extractor_*.txt"))
             File.Delete(staleFile);
-
-        foreach (var group in detectors.Chunk(8))
+        foreach (int id in ExtractorMacroIds)
         {
-            int first = group.First().ScreenNo;
-            int last = group.Last().ScreenNo;
-            File.WriteAllText(
-                Path.Combine(macroDirectory, $"config-extractor_{first:00}_{last:00}.txt"),
-                RenderConfigExtractor(group));
+            foreach (string staleFile in Directory.GetFiles(macroDirectory, $"{id}_Info Extractor *.ebm"))
+                File.Delete(staleFile);
+        }
+
+        var groups = detectors.Chunk(8).ToArray();
+        for (int groupIndex = 0; groupIndex < ExtractorMacroIds.Length; groupIndex++)
+        {
+            int first = groupIndex * 8 + 1;
+            int rangeEnd = first + 7;
+            bool enabled = groupIndex < groups.Length;
+            var group = enabled ? groups[groupIndex] : Array.Empty<DetectorPlan>();
+            int actualLast = enabled ? group.Last().ScreenNo : rangeEnd;
+            string source = enabled ? RenderConfigExtractor(group) : RenderEmptyMacro();
+            if (enabled)
+            {
+                File.WriteAllText(
+                    Path.Combine(macroDirectory, $"config-extractor_{first:00}_{actualLast:00}.txt"),
+                    source);
+            }
+            int id = ExtractorMacroIds[groupIndex];
+            string name = $"Info Extractor {first}-{actualLast}";
+            File.WriteAllBytes(
+                Path.Combine(macroDirectory, $"{id}_{name}.ebm"),
+                EncodeEbm(RenderEbm(id, name, startup: enabled, periodicInterval: enabled ? 600 : null, source)));
         }
     }
 
@@ -60,7 +81,43 @@ internal static class MacroGenerator
     }
 
     internal static void WriteRuntimeSampler(string outputDir, IReadOnlyList<DetectorPlan> detectors)
-        => File.WriteAllText(Path.Combine(outputDir, "macros", "runtime-sampler.txt"), RenderRuntimeSampler(detectors));
+    {
+        string source = RenderRuntimeSampler(detectors);
+        string macroDirectory = Path.Combine(outputDir, "macros");
+        File.WriteAllText(Path.Combine(macroDirectory, "runtime-sampler.txt"), source);
+        File.WriteAllBytes(
+            Path.Combine(macroDirectory, "10_Runtime Sampler.ebm"),
+            EncodeEbm(RenderEbm(10, "Runtime Sampler", startup: true, periodicInterval: 10, source)));
+    }
+
+    internal static string RenderEbm(int id, string name, bool startup, int? periodicInterval, string macroSource)
+    {
+        string periodic = periodicInterval is int interval
+            ? $"[ \"true\", \"{interval}\" ]"
+            : "[ \"false\" ]";
+        var lines = new[]
+        {
+            "macro_definition_begin",
+            $"    \"id\": \"{id}\"",
+            $"    \"name\": \"{name}\"",
+            $"    \"startup\": \"{startup.ToString().ToLowerInvariant()}\"",
+            $"    \"periodic\": {periodic}",
+            "    \"interlock\": [ \"false\" ]",
+            "macro_definition_end",
+            "",
+        };
+        return string.Join("\r\n", lines) + "\r\n" + macroSource.ReplaceLineEndings("\r\n").TrimEnd('\r', '\n');
+    }
+
+    internal static byte[] EncodeEbm(string content)
+    {
+        byte[] preamble = Encoding.UTF8.GetPreamble();
+        byte[] body = Encoding.UTF8.GetBytes(content);
+        byte[] result = new byte[preamble.Length + body.Length];
+        preamble.CopyTo(result, 0);
+        body.CopyTo(result, preamble.Length);
+        return result;
+    }
 
     internal static string RenderRuntimeSampler(IReadOnlyList<DetectorPlan> detectors)
     {
@@ -98,4 +155,6 @@ internal static class MacroGenerator
         sb.AppendLine("end macro_command");
         return sb.ToString();
     }
+
+    private static string RenderEmptyMacro() => "macro_command main()\n\nend macro_command\n";
 }

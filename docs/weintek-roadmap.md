@@ -2,11 +2,11 @@
 
 ## Near Term
 
-- Validate the structurally corrected `--allow-binary-expansion` output in EasyBuilder/offline simulator for both digital and analog configurations.
+- Validate imported generated EBM macros and offline simulator behavior for both digital and analog configurations; CXOB decompile/full-compile round trips now pass.
 - Drive object colors from generated `DetN-AlarmSeverity` instead of directly from Alarm 1/2/3 bits.
 - Use `DisplayFormat` for all numeric objects: live value, range, thresholds and trend axes.
 - Use `trend-channels.csv` to configure a consistent trend/data-sampling page.
-- Export representative Address Tag CSV and macro EDM files from the exact production EasyBuilder/template version and build versioned import adapters from those exports.
+- Export representative Address Tag Library CSV files from the exact production EasyBuilder/template version and build versioned import adapters; EBM macro generation is now implemented from verified exports.
 
 ## Alarm Colors
 
@@ -20,14 +20,14 @@ This avoids duplicating Alarm 2 into Alarm 3 just to force a red visual state.
 
 ## Template Requirements
 
-The older sample `.cxob` template contains:
+The older sample `.cxob` template contains before EasyBuilder normalization:
 
 - 32 detector label slots.
 - 32 `ChN` value/trend tags.
 - 19 `info-Dn` config-block tags.
 - Short fixed-width address fields for some `info-Dn` tags.
 
-The newer `Start.cxob` template contains 32 detector label slots, 32 `ChN` tags and 32 `info-Dn` tags. The generator can rebuild its variable-length detector label records and `ENHANCEDTAGS_L32` table so short placeholders grow to fit digital and analog config addresses when `--allow-binary-expansion` is enabled. The default mode preserves project payload length for password-protected decompile compatibility.
+The newer `Start.cxob` template contains 32 detector label slots, 32 `ChN` tags and 32 `info-Dn` tags before normalization. The generator can rebuild its variable-length label and `ENHANCEDTAGS_L32` tables so short placeholders grow to fit digital and analog config addresses when `--allow-binary-expansion` is enabled. EasyBuilder removes unreferenced `Det-N` labels during compile, while expanded active `info-Dn` addresses survive. The default mode preserves project payload length for password-protected decompile compatibility.
 
 ## Longer Term
 

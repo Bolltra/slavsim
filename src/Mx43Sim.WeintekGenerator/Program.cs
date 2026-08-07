@@ -284,6 +284,7 @@ internal static class Program
         sb.AppendLine("- `tags/local-lw-tags.csv`: local cMT LW tags used by generated macros and objects.");
         sb.AppendLine("- `macros/config-extractor_*.txt`: reads the 68-register MX43 config block into local LW memory.");
         sb.AppendLine("- `macros/runtime-sampler.txt`: periodically reads live measurements and alarm bits.");
+        sb.AppendLine("- `macros/*.ebm`: EasyBuilder Pro 6.10.02 macro imports with startup/periodic metadata.");
         sb.AppendLine("- `*.generated.cxob`: optional output when `--template-cxob` is used. This is a conservative template patch, not a full EasyBuilder compile.");
         sb.AppendLine("- `*.template-report.md`: optional report describing the template's available fixed-width slots.");
         sb.AppendLine("- `*.warnings.txt`: patch notices and warnings. Expansion notices are informational; skipped, missing or truncated fields mean the `.cxob` is partial.");
@@ -310,7 +311,7 @@ internal static class Program
         sb.AppendLine();
         sb.AppendLine("Default `.cxob` patching preserves the original `project` payload length. This is the mode to use when the output must decompile in EasyBuilder with the template password, but too-short fields may be truncated or skipped with warnings.");
         sb.AppendLine();
-        sb.AppendLine("`--allow-binary-expansion` rebuilds mapped variable-length label/tag sections, project lengths and known relocation metadata so longer labels and addresses fit. The result is structurally validated by the generator but still requires an EasyBuilder compile/decompile and offline-simulator check because the complete proprietary project format is not documented.");
+        sb.AppendLine("`--allow-binary-expansion` rebuilds mapped variable-length label/tag sections, project lengths and known relocation metadata so longer labels and addresses fit. EasyBuilder 6.10.02 has successfully decompiled and recompiled digital and analog expanded files, preserving all active `info-Dn` addresses. Unreferenced `Det-N` label records are discarded by EasyBuilder, so display names must be driven by referenced template objects/local LW data rather than detached label placeholders.");
         File.WriteAllText(Path.Combine(outputDir, "README.md"), sb.ToString());
     }
 
@@ -459,11 +460,13 @@ internal static class Program
 
     private static byte[] ExpandDetectorLabelsIfNeeded(byte[] project, DetectorPlan[] detectors, List<string> warnings)
     {
+        LabelLibrary? library = ParseLabelLibrary(project);
+        if (library is null) return project;
         var labels = ParseDetectorLabelSlots(project).ToArray();
         if (labels.Length == 0) return project;
 
         bool needsExpansion = false;
-        foreach (var d in detectors.Take(labels.Length))
+        foreach (var d in detectors)
         {
             int required = Encoding.UTF8.GetByteCount(d.Label);
             var slot = labels.FirstOrDefault(l => l.Slot == d.ScreenNo);
@@ -479,27 +482,28 @@ internal static class Program
         byte[] tagMarker = Encoding.ASCII.GetBytes("ENHANCEDTAGS_L32");
         byte[] macroMarker = Encoding.ASCII.GetBytes("MACRO_ID");
         byte[] tagDataMarker = Encoding.ASCII.GetBytes("TAG_DATA");
-        int firstRecordStart = labels.Min(l => l.Offset);
-        int oldLabelsEnd = labels.Max(l => l.EndOffset);
         int oldTagTableOffset = IndexOf(project, tagMarker);
         int oldMacroOffset = IndexOf(project, macroMarker);
         int oldTagDataOffset = IndexOf(project, tagDataMarker);
-        if (firstRecordStart < 0 || oldLabelsEnd <= firstRecordStart || oldTagTableOffset < oldLabelsEnd || oldMacroOffset <= oldTagTableOffset || oldTagDataOffset <= oldMacroOffset)
+        if (library.EndOffset != oldTagTableOffset || oldMacroOffset <= oldTagTableOffset || oldTagDataOffset <= oldMacroOffset)
         {
             warnings.Add("Could not expand detector labels safely; falling back to fixed-width label patching.");
             return project;
         }
 
+        var detectorByKey = detectors.ToDictionary(d => $"Det-{d.ScreenNo}", StringComparer.Ordinal);
         using var rebuilt = new MemoryStream();
-        foreach (var slot in labels.OrderBy(l => l.Slot))
+        rebuilt.Write(Encoding.ASCII.GetBytes("LABE_LIB"));
+        rebuilt.Write(BitConverter.GetBytes((ushort)library.Records.Count));
+        foreach (var record in library.Records)
         {
-            string value = slot.Slot <= detectors.Length ? detectors[slot.Slot - 1].Label : slot.Slot.ToString(CultureInfo.InvariantCulture);
-            byte[] keyBytes = Encoding.ASCII.GetBytes(slot.Key);
+            string value = detectorByKey.TryGetValue(record.Key, out var detector) ? detector.Label : record.Value;
+            byte[] keyBytes = Encoding.ASCII.GetBytes(record.Key);
             byte[] valueBytes = Encoding.UTF8.GetBytes(value);
-            byte[] suffixBytes = slot.Suffix;
-            int valueLength = Math.Max(slot.ValueLength, valueBytes.Length);
+            byte[] suffixBytes = record.Suffix;
+            int valueLength = Math.Max(record.ValueLength, valueBytes.Length);
             if (keyBytes.Length > byte.MaxValue || valueLength > byte.MaxValue || suffixBytes.Length > byte.MaxValue)
-                throw new InvalidOperationException($"Detector label record too long: {slot.Key}");
+                throw new InvalidOperationException($"Label record too long: {record.Key}");
 
             rebuilt.WriteByte((byte)keyBytes.Length);
             rebuilt.WriteByte((byte)valueLength);
@@ -511,14 +515,14 @@ internal static class Program
         }
 
         byte[] newLabels = rebuilt.ToArray();
-        int oldLabelsLength = oldLabelsEnd - firstRecordStart;
+        int oldLabelsLength = library.EndOffset - library.Offset;
         int delta = newLabels.Length - oldLabelsLength;
         byte[] updated = new byte[project.Length + delta];
-        Buffer.BlockCopy(project, 0, updated, 0, firstRecordStart);
-        Buffer.BlockCopy(newLabels, 0, updated, firstRecordStart, newLabels.Length);
-        Buffer.BlockCopy(project, oldLabelsEnd, updated, firstRecordStart + newLabels.Length, project.Length - oldLabelsEnd);
+        Buffer.BlockCopy(project, 0, updated, 0, library.Offset);
+        Buffer.BlockCopy(newLabels, 0, updated, library.Offset, newLabels.Length);
+        Buffer.BlockCopy(project, library.EndOffset, updated, library.Offset + newLabels.Length, project.Length - library.EndOffset);
 
-        RelocateProject(project, updated, oldLabelsEnd, delta, oldMacroOffset, oldTagDataOffset);
+        RelocateProject(project, updated, library.EndOffset, delta, oldMacroOffset, oldTagDataOffset);
 
         warnings.Add($"Expanded detector label records by {delta} byte(s) so labels can fit this CFG; EasyBuilder validation is still required.");
         return updated;
@@ -658,27 +662,48 @@ internal static class Program
 
     private static IEnumerable<DetectorLabelSlot> ParseDetectorLabelSlots(byte[] project)
     {
-        int recordStart = FindDetectorLabelRecordStart(project);
-        if (recordStart < 0) yield break;
-        for (int slot = 1; slot <= 32; slot++)
+        LabelLibrary? library = ParseLabelLibrary(project);
+        if (library is null) yield break;
+        foreach (var record in library.Records)
         {
-            if (recordStart + 3 > project.Length) yield break;
-            int keyLen = project[recordStart];
-            int valueLen = project[recordStart + 1];
-            int suffixLen = project[recordStart + 2];
-            int keyOffset = recordStart + 3;
+            if (!record.Key.StartsWith("Det-", StringComparison.Ordinal) ||
+                !int.TryParse(record.Key.AsSpan(4), NumberStyles.None, CultureInfo.InvariantCulture, out int slot) ||
+                slot is < 1 or > 32 || !record.Key.Equals($"Det-{slot}", StringComparison.Ordinal)) continue;
+            yield return new DetectorLabelSlot(record.Offset, record.EndOffset, slot, record.Key, record.Value, record.ValueLength, record.Suffix);
+        }
+    }
+
+    private static LabelLibrary? ParseLabelLibrary(byte[] project)
+    {
+        byte[] marker = Encoding.ASCII.GetBytes("LABE_LIB");
+        int markerOffset = IndexOf(project, marker);
+        if (markerOffset < 0 || markerOffset + marker.Length + 2 > project.Length) return null;
+
+        int count = BitConverter.ToUInt16(project, markerOffset + marker.Length);
+        int off = markerOffset + marker.Length + 2;
+        var records = new List<LabelRecord>(count);
+        for (int record = 0; record < count; record++)
+        {
+            if (off + 3 > project.Length) return null;
+            int keyLen = project[off];
+            int valueLen = project[off + 1];
+            int suffixLen = project[off + 2];
+            int keyOffset = off + 3;
             int valueOffset = keyOffset + keyLen;
             int suffixOffset = valueOffset + valueLen;
             int next = suffixOffset + suffixLen;
-            if (next > project.Length) yield break;
+            if (next > project.Length) return null;
 
-            string key = Encoding.ASCII.GetString(project, keyOffset, keyLen);
-            if (!key.Equals($"Det-{slot}", StringComparison.Ordinal)) yield break;
-            string value = Encoding.UTF8.GetString(project, valueOffset, valueLen);
-            byte[] suffix = project[suffixOffset..next];
-            yield return new DetectorLabelSlot(recordStart, next, slot, key, value, valueLen, suffix);
-            recordStart = next;
+            records.Add(new LabelRecord(
+                off,
+                next,
+                Encoding.ASCII.GetString(project, keyOffset, keyLen),
+                Encoding.UTF8.GetString(project, valueOffset, valueLen),
+                valueLen,
+                project[suffixOffset..next]));
+            off = next;
         }
+        return new LabelLibrary(markerOffset, off, records);
     }
 
     private static void ExtractGzipTar(string gzipTarPath, string outputDir)
@@ -741,45 +766,23 @@ internal static class Program
 
     private static void PatchDetectorLabels(byte[] project, DetectorPlan[] detectors, List<string> warnings)
     {
-        int recordStart = FindDetectorLabelRecordStart(project);
-        if (recordStart < 0)
+        var labels = ParseDetectorLabelSlots(project).ToArray();
+        if (labels.Length == 0)
         {
-            warnings.Add("Could not locate Det-1 label-library entry; detector labels were not patched.");
+            warnings.Add("Template has no Det-N label-library entries; detector labels were not patched and must be driven by referenced template objects.");
             return;
         }
 
-        for (int slot = 1; slot <= 32; slot++)
+        foreach (var detector in detectors)
         {
-            if (recordStart + 3 > project.Length)
+            var label = labels.FirstOrDefault(l => l.Slot == detector.ScreenNo);
+            if (label is null)
             {
-                warnings.Add($"Label table ended before slot {slot}.");
-                return;
+                warnings.Add($"Template has no Det-{detector.ScreenNo} label entry; '{detector.Label}' was not patched.");
+                continue;
             }
-
-            int keyLen = project[recordStart];
-            int valueLen = project[recordStart + 1];
-            int suffixLen = project[recordStart + 2];
-            int keyOffset = recordStart + 3;
-            int valueOffset = keyOffset + keyLen;
-            int suffixOffset = valueOffset + valueLen;
-            int next = suffixOffset + suffixLen;
-            if (next > project.Length)
-            {
-                warnings.Add($"Invalid label-library entry at slot {slot}.");
-                return;
-            }
-
-            string expectedKey = slot <= 9 ? $"Det-{slot}" : $"Det-{slot}";
-            string key = Encoding.ASCII.GetString(project, keyOffset, keyLen);
-            if (!key.Equals(expectedKey, StringComparison.Ordinal))
-            {
-                warnings.Add($"Unexpected label key at slot {slot}: '{key}', expected '{expectedKey}'. Stopped label patching.");
-                return;
-            }
-
-            string label = slot <= detectors.Length ? detectors[slot - 1].Label : slot.ToString(CultureInfo.InvariantCulture);
-            WriteFixedUtf8(project, valueOffset, valueLen, label, warnings, $"label Det-{slot}");
-            recordStart = next;
+            int valueOffset = label.Offset + 3 + Encoding.ASCII.GetByteCount(label.Key);
+            WriteFixedUtf8(project, valueOffset, label.ValueLength, detector.Label, warnings, $"label Det-{detector.ScreenNo}");
         }
     }
 
@@ -846,16 +849,6 @@ internal static class Program
             if (j == needle.Length) return i;
         }
         return -1;
-    }
-
-    private static int FindDetectorLabelRecordStart(byte[] project)
-    {
-        int library = IndexOf(project, Encoding.ASCII.GetBytes("LABE_LIB1"));
-        int tagTable = IndexOf(project, Encoding.ASCII.GetBytes("ENHANCEDTAGS_L32"));
-        if (library < 0 || tagTable <= library) return -1;
-
-        int key = IndexOf(project, Encoding.ASCII.GetBytes("Det-1"), library);
-        return key >= 3 && key < tagTable ? key - 3 : -1;
     }
 
     private static string ReadNullTerminatedAscii(byte[] data, int offset, int length)
@@ -959,15 +952,15 @@ internal static class Program
     private static void ValidateProjectStructure(byte[] project)
     {
         ValidateProjectHeader(project);
-        int labelStart = FindDetectorLabelRecordStart(project);
-        var labels = ParseDetectorLabelSlots(project).ToArray();
+        LabelLibrary? labelLibrary = ParseLabelLibrary(project);
         var tags = ParseTags(project).ToArray();
+        int labelOffset = UniqueMarkerOffset(project, "LABE_LIB");
         int tagOffset = UniqueMarkerOffset(project, "ENHANCEDTAGS_L32");
         int macroOffset = UniqueMarkerOffset(project, "MACRO_ID");
         int tagDataOffset = UniqueMarkerOffset(project, "TAG_DATA");
 
-        if (labelStart < 0 || labels.Length != 32 || labels[^1].EndOffset != tagOffset)
-            throw new InvalidOperationException("Detector label section is incomplete or does not end at ENHANCEDTAGS_L32.");
+        if (labelLibrary is null || labelLibrary.Offset != labelOffset || labelLibrary.EndOffset != tagOffset)
+            throw new InvalidOperationException("Label library is incomplete or does not end at ENHANCEDTAGS_L32.");
         if (tags.Length == 0 || TagTableEnd(project, tagOffset) != macroOffset)
             throw new InvalidOperationException("Enhanced tag section is incomplete or does not end at MACRO_ID.");
         if (macroOffset >= tagDataOffset || tagDataOffset < 4 || BitConverter.ToInt32(project, tagDataOffset - 4) != macroOffset)
@@ -1003,6 +996,10 @@ internal static class Program
     private sealed record TagRecord(int Offset, byte Flag, byte Class, byte Kind, string Name, string Address, int NameFieldLength, int AddressFieldLength);
 
     private sealed record DetectorLabelSlot(int Offset, int EndOffset, int Slot, string Key, string Value, int ValueLength, byte[] Suffix);
+
+    private sealed record LabelRecord(int Offset, int EndOffset, string Key, string Value, int ValueLength, byte[] Suffix);
+
+    private sealed record LabelLibrary(int Offset, int EndOffset, IReadOnlyList<LabelRecord> Records);
 
     private sealed record TemplateReport(IReadOnlyList<TagRecord> Tags, IReadOnlyList<DetectorLabelSlot> Labels, IReadOnlyList<string> Warnings);
 

@@ -59,8 +59,9 @@ metadata record.
 The mapped sections occur in this order:
 
 ```text
-LABE_LIB1
-detector label records
+LABE_LIB
+uint16 LE label record count
+label records
 ENHANCEDTAGS_L32
 enhanced tag records
 MACRO_ID
@@ -69,9 +70,12 @@ uint32 LE pointer to MACRO_ID
 TAG_DATA
 ```
 
-The detector-label region contains 32 sequential records:
+The label library is:
 
 ```text
+ASCII "LABE_LIB"
+uint16 LE recordCount
+recordCount * {
 byte keyLength
 byte valueLength
 byte suffixLength
@@ -79,7 +83,15 @@ keyLength bytes key
 valueLength bytes value (the generator writes UTF-8; non-ASCII behavior still
 requires EasyBuilder validation)
 suffixLength bytes opaque suffix
+}
 ```
+
+The original templates had 49 records, with `Det-1..Det-32` as the final 32
+entries. EasyBuilder 6.10.02 rebuilt the libraries to 4 and 20 referenced records
+during the verified compile round trips and removed every detached `Det-N`
+entry. Structural validation therefore covers the complete counted library;
+detector-label patching is only available when exact `Det-N` keys exist and is
+not a reliable way to drive screen text unless objects reference those keys.
 
 The enhanced-tag table is:
 
@@ -135,3 +147,17 @@ mapped, so this project does not attempt to generate or modify `.cmtp` directly.
 These unknowns are why post-patch structural validation is necessary but not
 sufficient for a production release. EasyBuilder remains the final compiler and
 validator.
+
+## Verified Round Trip
+
+Both corrected expanded outputs were decompiled and fully recompiled with
+EasyBuilder Pro 6.10.02.300. The recompiled projects retained:
+
+- Digital `info-D1..D19` addresses `1,2,3,33..48`.
+- Analog `info-D1..D8` addresses `257..264`.
+- Enhanced-tag record counts and macro/TAG_DATA structural links.
+
+EasyBuilder minimized unused `info-D` address fields and rebuilt both label
+libraries, which the parser now accepts. This validates enhanced-tag expansion
+and the mapped relocation rules for the two template families, but not runtime
+screen wiring, generated macro execution or trend behavior.
