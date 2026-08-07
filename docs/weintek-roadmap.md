@@ -3,10 +3,11 @@
 ## Near Term
 
 - Validate imported generated EBM macros and offline simulator behavior for both digital and analog configurations; CXOB decompile/full-compile round trips now pass.
+- Validate the generated EasyBuilder Address Tag Library CSV imports for both template families.
 - Drive object colors from generated `DetN-AlarmSeverity` instead of directly from Alarm 1/2/3 bits.
 - Use `DisplayFormat` for all numeric objects: live value, range, thresholds and trend axes.
 - Use `trend-channels.csv` to configure a consistent trend/data-sampling page.
-- Export representative Address Tag Library CSV files from the exact production EasyBuilder/template version and build versioned import adapters; EBM macro generation is now implemented from verified exports.
+- Decide explicit Data Sampling policies for the analog template: interval, storage, retention, folder and filename.
 
 ## Alarm Colors
 

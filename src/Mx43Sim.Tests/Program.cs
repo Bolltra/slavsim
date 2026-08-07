@@ -415,6 +415,52 @@ internal static class Program
         Assert("Weintek disabled EBM is non-periodic", disabledEbm.Contains(
             "\"startup\": \"false\"\r\n    \"periodic\": [ \"false\" ]", StringComparison.Ordinal), true);
 
+        string mx43Tags = AddressTagLibraryGenerator.RenderMx43(plans);
+        string localTags = AddressTagLibraryGenerator.RenderLocal(plans);
+        Assert("Weintek MX43 import has three tags per detector",
+            mx43Tags.Split("\r\n", StringSplitOptions.RemoveEmptyEntries).Length, plans.Length * 3);
+        Assert("Weintek local import has sixteen tags per detector",
+            localTags.Split("\r\n", StringSplitOptions.RemoveEmptyEntries).Length, plans.Length * 16);
+        Assert("Weintek MX43 import uses exact six-column format", mx43Tags.Contains(
+            "info-D1,MX43,3x,1,,16-bit Signed\r\n" +
+            "meas-D1,MX43,3x,2001,,16-bit Signed\r\n" +
+            "alarm-D1,MX43,3x,2301,,16-bit Unsigned\r\n", StringComparison.Ordinal), true);
+        Assert("Weintek local import includes signed runtime values", localTags.Contains(
+            "Det1-Measurement,cMT,LW,170,,16-bit Signed\r\n", StringComparison.Ordinal), true);
+        Assert("Weintek local import includes unsigned alarm bits", localTags.Contains(
+            "Det1-AlarmBits,cMT,LW,171,,16-bit Unsigned\r\n", StringComparison.Ordinal), true);
+        Assert("Weintek tag imports have no header", mx43Tags.StartsWith("Name,", StringComparison.Ordinal), false);
+        Assert("Weintek tag imports use CRLF", HasBareLineFeed(mx43Tags) || HasBareLineFeed(localTags), false);
+        Assert("Weintek tag imports end with CRLF",
+            mx43Tags.EndsWith("\r\n", StringComparison.Ordinal) && localTags.EndsWith("\r\n", StringComparison.Ordinal), true);
+        Assert("Weintek tag imports contain six fields", mx43Tags.Split("\r\n", StringSplitOptions.RemoveEmptyEntries)
+            .Concat(localTags.Split("\r\n", StringSplitOptions.RemoveEmptyEntries))
+            .All(line => line.Split(',').Length == 6 && line.Split(',')[4].Length == 0), true);
+
+        string tagOutput = Path.Combine(Path.GetTempPath(), "mx43-tags-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(tagOutput, "tags"));
+            AddressTagLibraryGenerator.Write(tagOutput, plans);
+            byte[] mx43TagBytes = File.ReadAllBytes(Path.Combine(tagOutput, "tags", "mx43-address-tag-library.csv"));
+            Assert("Weintek tag import file has no UTF-8 BOM",
+                mx43TagBytes.AsSpan(0, 3).SequenceEqual(new byte[] { 0xEF, 0xBB, 0xBF }), false);
+            Assert("Weintek local tag import file is written", File.Exists(
+                Path.Combine(tagOutput, "tags", "local-lw-address-tag-library.csv")), true);
+        }
+        finally
+        {
+            if (Directory.Exists(tagOutput)) Directory.Delete(tagOutput, recursive: true);
+        }
+
+        var analogCfg = new Mx43Config();
+        analogCfg.Sensors.Add(new Sensor { Line = 1, Detector = 1, AnalogChannel = 1 });
+        string analogTags = AddressTagLibraryGenerator.RenderMx43(DetectorPlanner.Create(analogCfg));
+        Assert("Weintek analog import uses mapped registers", analogTags,
+            "info-D1,MX43,3x,257,,16-bit Signed\r\n" +
+            "meas-D1,MX43,3x,2257,,16-bit Signed\r\n" +
+            "alarm-D1,MX43,3x,2557,,16-bit Unsigned\r\n");
+
         var patchCfg = new Mx43Config();
         patchCfg.Sensors.Add(new Sensor
         {

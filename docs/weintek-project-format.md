@@ -135,11 +135,39 @@ The available `.cmtp` starts with a small versioned framing header followed by a
 block encoding or encryption. Its serialization and protection scheme are not
 mapped, so this project does not attempt to generate or modify `.cmtp` directly.
 
+## Address Tag Library CSV
+
+EasyBuilder Pro 6.10.02.300 exports Address Tag Library CSV rows as:
+
+```text
+Name,Device,AddressKind,Address,,DataType\r\n
+```
+
+The verified files have no header or BOM, use CRLF throughout and end with a
+final CRLF. The fifth field is empty. Examples are
+`info-D1,MX43,3x,257,,16-bit Signed` and
+`Det1-Name,cMT,LW,100,,16-bit Unsigned`.
+
+The generator emits active `info-Dn`, `meas-Dn` and `alarm-Dn` rows separately
+from generated local cMT LW rows. It does not emit template-owned UAC, `ChN`,
+selector or inactive address-zero placeholders. Existing richer CSV manifests
+remain because this import format does not encode block/string lengths or
+comments.
+
+## Data Sampling Export
+
+The verified `.xlsx` is a version 4 EasyBuilder Data Sampling settings export,
+not historical sampled data. It contains two Volvo-specific raw `MX43`/`3x`
+groups at bases `1` and `33`. Address indexes initialized to `2000` make their
+effective measurement ranges `2001..2003` and `2033..2048`. Sampling intervals,
+storage destination, retention, folder names and filename policy are project
+settings that cannot be derived safely from an MX43 CFG alone.
+
 ## Remaining Unknowns
 
 - Complete object/window serialization.
 - Compiled `script` encoding and macro execution metadata.
-- Data Sampling and Trend Display object records.
+- Data Sampling and Trend Display records inside the proprietary project payload.
 - Integrity or checksum fields beyond gzip/tar checksums.
 - Whether all EasyBuilder versions use the same mapped record layouts.
 - A supported non-interactive EasyBuilder compile interface.

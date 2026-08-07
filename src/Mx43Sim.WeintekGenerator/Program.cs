@@ -87,6 +87,7 @@ internal static class Program
         WriteTrendChannelsCsv(outputDir, detectors);
         WriteMx43TagCsv(outputDir, detectors);
         WriteLocalTagCsv(outputDir, detectors);
+        AddressTagLibraryGenerator.Write(outputDir, detectors);
         MacroGenerator.WriteConfigExtractors(outputDir, detectors);
         MacroGenerator.WriteRuntimeSampler(outputDir, detectors);
         WriteReadme(outputDir, cfgPath, cfg, detectors);
@@ -280,8 +281,10 @@ internal static class Program
         sb.AppendLine("- `weintek-plan.json`: machine-readable plan for patching/building a cMT project.");
         sb.AppendLine("- `detectors.csv`: detector order, Modbus addresses and local LW layout.");
         sb.AppendLine("- `trend-channels.csv`: detector measurement/alarm channels intended for trend/data-sampling setup.");
-        sb.AppendLine("- `tags/mx43-tags.csv`: MX43-side tags (`info-Dn`, `meas-Dn`, `alarm-Dn`).");
-        sb.AppendLine("- `tags/local-lw-tags.csv`: local cMT LW tags used by generated macros and objects.");
+        sb.AppendLine("- `tags/mx43-tags.csv`: review manifest for MX43-side tags (`info-Dn`, `meas-Dn`, `alarm-Dn`).");
+        sb.AppendLine("- `tags/local-lw-tags.csv`: review manifest for local cMT LW tags used by generated macros and objects.");
+        sb.AppendLine("- `tags/mx43-address-tag-library.csv`: EasyBuilder Address Tag Library import for active MX43 tags.");
+        sb.AppendLine("- `tags/local-lw-address-tag-library.csv`: EasyBuilder Address Tag Library import for generated local cMT LW tags.");
         sb.AppendLine("- `macros/config-extractor_*.txt`: reads the 68-register MX43 config block into local LW memory.");
         sb.AppendLine("- `macros/runtime-sampler.txt`: periodically reads live measurements and alarm bits.");
         sb.AppendLine("- `macros/*.ebm`: EasyBuilder Pro 6.10.02 macro imports with startup/periodic metadata.");
