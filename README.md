@@ -55,6 +55,7 @@ src/
     MainForm.cs    editor + grid + log
     Program.cs     STAThread entry point
   Mx43Sim.Tests/               console smoke + end-to-end tests
+  Mx43Sim.WeintekGenerator/    CLI generator for EasyBuilder tags, macros, sampling and patched templates
 
 tools/
   regen_address_map.py   regenerate the embedded address map from Mx43 adresslista.xlsx

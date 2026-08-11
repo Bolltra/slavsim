@@ -36,7 +36,10 @@ internal static class AddressTagLibraryGenerator
 
     internal static string RenderLocal(IReadOnlyList<DetectorPlan> detectors)
     {
-        var rows = new List<string>(detectors.Count * 16);
+        var rows = new List<string>(1 + detectors.Count * 16)
+        {
+            Row("Project-Title", "cMT", "LW", WeintekLayout.ProjectTitleLw, "16-bit Unsigned"),
+        };
         foreach (var d in detectors)
         {
             rows.Add(Row($"Det{d.ScreenNo}-Name", "cMT", "LW", d.LwName, "16-bit Unsigned"));

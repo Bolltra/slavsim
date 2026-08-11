@@ -1,10 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Xml.Linq;
 using Mx43Sim.Core.Cfg;
 using Mx43Sim.Core.Domain;
 using Mx43Sim.Core.Modbus;
@@ -415,12 +418,29 @@ internal static class Program
         Assert("Weintek disabled EBM is non-periodic", disabledEbm.Contains(
             "\"startup\": \"false\"\r\n    \"periodic\": [ \"false\" ]", StringComparison.Ordinal), true);
 
+        Assert("Weintek title defaults from CFG", Mx43Sim.WeintekGenerator.Program.ResolveProjectTitle("Central A", null), "Central A");
+        Assert("Weintek title supports override", Mx43Sim.WeintekGenerator.Program.ResolveProjectTitle("Central A", "Site B"), "Site B");
+        Assert("Weintek empty title falls back", Mx43Sim.WeintekGenerator.Program.ResolveProjectTitle("", null), "MX43");
+        bool longTitleRejected = false;
+        try { Mx43Sim.WeintekGenerator.Program.ResolveProjectTitle("12345678901234567", null); }
+        catch (InvalidOperationException) { longTitleRejected = true; }
+        Assert("Weintek title rejects more than sixteen words", longTitleRejected, true);
+        string initializer = MacroGenerator.RenderProjectInitializer("Mälaren");
+        Assert("Weintek initializer writes Unicode title", initializer.Contains("ProjectTitle[1] = 0x00E4", StringComparison.Ordinal), true);
+        Assert("Weintek initializer writes title LW", initializer.Contains("SetData(ProjectTitle[0], \"cMT\", LW, 3300, 16)", StringComparison.Ordinal), true);
+        Assert("Weintek initializer configures measurement index", initializer.Contains("SetData(MeasurementAddressIndex, \"cMT\", LW, 9201, 1)", StringComparison.Ordinal), true);
+        string initializerEbm = MacroGenerator.RenderEbm(11, "Project Initializer", startup: true, periodicInterval: null, initializer);
+        Assert("Weintek initializer EBM is one-shot startup", initializerEbm.Contains(
+            "\"id\": \"11\"\r\n    \"name\": \"Project Initializer\"\r\n    \"startup\": \"true\"\r\n    \"periodic\": [ \"false\" ]", StringComparison.Ordinal), true);
+
         string mx43Tags = AddressTagLibraryGenerator.RenderMx43(plans);
         string localTags = AddressTagLibraryGenerator.RenderLocal(plans);
         Assert("Weintek MX43 import has three tags per detector",
             mx43Tags.Split("\r\n", StringSplitOptions.RemoveEmptyEntries).Length, plans.Length * 3);
-        Assert("Weintek local import has sixteen tags per detector",
-            localTags.Split("\r\n", StringSplitOptions.RemoveEmptyEntries).Length, plans.Length * 16);
+        Assert("Weintek local import has title plus sixteen tags per detector",
+            localTags.Split("\r\n", StringSplitOptions.RemoveEmptyEntries).Length, 1 + plans.Length * 16);
+        Assert("Weintek local import contains project title", localTags.StartsWith(
+            "Project-Title,cMT,LW,3300,,16-bit Unsigned\r\n", StringComparison.Ordinal), true);
         Assert("Weintek MX43 import uses exact six-column format", mx43Tags.Contains(
             "info-D1,MX43,3x,1,,16-bit Signed\r\n" +
             "meas-D1,MX43,3x,2001,,16-bit Signed\r\n" +
@@ -441,12 +461,25 @@ internal static class Program
         try
         {
             Directory.CreateDirectory(Path.Combine(tagOutput, "tags"));
+            Directory.CreateDirectory(Path.Combine(tagOutput, "macros"));
             AddressTagLibraryGenerator.Write(tagOutput, plans);
             byte[] mx43TagBytes = File.ReadAllBytes(Path.Combine(tagOutput, "tags", "mx43-address-tag-library.csv"));
             Assert("Weintek tag import file has no UTF-8 BOM",
                 mx43TagBytes.AsSpan(0, 3).SequenceEqual(new byte[] { 0xEF, 0xBB, 0xBF }), false);
             Assert("Weintek local tag import file is written", File.Exists(
                 Path.Combine(tagOutput, "tags", "local-lw-address-tag-library.csv")), true);
+            File.WriteAllText(Path.Combine(tagOutput, "macros", "9_Info-Extractor 25-32.ebm"), "stale");
+            File.WriteAllText(Path.Combine(tagOutput, "macros", "10_Old Runtime.ebm"), "stale");
+            File.WriteAllText(Path.Combine(tagOutput, "macros", "11_Old Initializer.ebm"), "stale");
+            MacroGenerator.WriteConfigExtractors(tagOutput, plans);
+            MacroGenerator.WriteRuntimeSampler(tagOutput, plans);
+            MacroGenerator.WriteProjectInitializer(tagOutput, "MX43");
+            Assert("Weintek macro cleanup keeps one ID 9 export", Directory.GetFiles(
+                Path.Combine(tagOutput, "macros"), "9_*.ebm").Length, 1);
+            Assert("Weintek macro cleanup keeps one ID 10 export", Directory.GetFiles(
+                Path.Combine(tagOutput, "macros"), "10_*.ebm").Length, 1);
+            Assert("Weintek macro cleanup keeps one ID 11 export", Directory.GetFiles(
+                Path.Combine(tagOutput, "macros"), "11_*.ebm").Length, 1);
         }
         finally
         {
@@ -460,6 +493,81 @@ internal static class Program
             "info-D1,MX43,3x,257,,16-bit Signed\r\n" +
             "meas-D1,MX43,3x,2257,,16-bit Signed\r\n" +
             "alarm-D1,MX43,3x,2557,,16-bit Unsigned\r\n");
+
+        var samplingCfg = new Mx43Config();
+        samplingCfg.Sensors.Add(new Sensor { Line = 1, Detector = 1, Label = "Digital 1", Range = 1000 });
+        samplingCfg.Sensors.Add(new Sensor { Line = 1, Detector = 2, Label = "Digital 2", Range = 1000 });
+        samplingCfg.Sensors.Add(new Sensor { Line = 2, Detector = 1, Label = "Digital 33", Range = 300 });
+        samplingCfg.Sensors.Add(new Sensor { Line = 1, Detector = 1, AnalogChannel = 1, Label = "Analog & O2 😀", Range = 250, DisplayFormat = 1 });
+        var samplingPlans = DetectorPlanner.Create(samplingCfg);
+        var samplingGroups = DataSamplingGenerator.CreateGroups(samplingPlans, "Test Site");
+        Assert("Weintek sampling splits non-contiguous ranges", samplingGroups.Length, 3);
+        Assert("Weintek sampling first base", samplingGroups[0].BaseConfigRegister, 1);
+        Assert("Weintek sampling second base", samplingGroups[1].BaseConfigRegister, 33);
+        Assert("Weintek sampling analog base", samplingGroups[2].BaseConfigRegister, 257);
+        Assert("Weintek sampling uses stable register folder", samplingGroups[2].FolderName.EndsWith("-R257", StringComparison.Ordinal), true);
+        Assert("Weintek sampling filename fits EasyBuilder limit",
+            samplingGroups.All(group => group.FileName.Length <= DataSamplingGenerator.MaximumCustomizedFileNameLength), true);
+
+        var longNameGroups = DataSamplingGenerator.CreateGroups(samplingPlans, "123456789012345678901234567890");
+        Assert("Weintek long storage key filenames fit EasyBuilder limit",
+            longNameGroups.All(group => group.FileName.Length <= DataSamplingGenerator.MaximumCustomizedFileNameLength), true);
+        string collisionA = DataSamplingGenerator.CreateGroups(samplingPlans, "ABCDEFGHIJK-Site-A")[2].FolderName;
+        string collisionB = DataSamplingGenerator.CreateGroups(samplingPlans, "ABCDEFGHIJK-Site-B")[2].FolderName;
+        Assert("Weintek storage hash separates truncated keys", collisionA == collisionB, false);
+        DataSamplingGenerator.ValidatePolicy(new DataSamplingGenerator.SamplingPolicy(100, 1, 1));
+        DataSamplingGenerator.ValidatePolicy(new DataSamplingGenerator.SamplingPolicy(7_200_000, 65_535, 1_440));
+        bool invalidPolicyRejected = false;
+        try { DataSamplingGenerator.ValidatePolicy(new DataSamplingGenerator.SamplingPolicy(99, 90, 60)); }
+        catch (ArgumentOutOfRangeException) { invalidPolicyRejected = true; }
+        Assert("Weintek sampling rejects out-of-range policy", invalidPolicyRejected, true);
+
+        byte[] samplingWorkbook = DataSamplingGenerator.CreateWorkbook(samplingPlans, "Test Site");
+        using (var samplingArchive = new ZipArchive(new MemoryStream(samplingWorkbook), ZipArchiveMode.Read))
+        {
+            Assert("Weintek sampling workbook has seven OOXML parts", samplingArchive.Entries.Count, 7);
+            Assert("Weintek sampling workbook has exact OOXML parts", samplingArchive.Entries.Select(entry => entry.FullName).SequenceEqual(new[]
+            {
+                "[Content_Types].xml",
+                "_rels/.rels",
+                "xl/_rels/workbook.xml.rels",
+                "xl/sharedStrings.xml",
+                "xl/styles.xml",
+                "xl/workbook.xml",
+                "xl/worksheets/sheet1.xml",
+            }), true);
+            byte[] sharedStringBytes = ReadZipEntry(samplingArchive, "xl/sharedStrings.xml");
+            string sharedStrings = Encoding.UTF8.GetString(sharedStringBytes);
+            Assert("Weintek sampling XML has no BOM", sharedStringBytes.AsSpan(0, 3).SequenceEqual(new byte[] { 0xEF, 0xBB, 0xBF }), false);
+            Assert("Weintek sampling workbook is version four", sharedStrings.Contains("Version: 4", StringComparison.Ordinal), true);
+            Assert("Weintek sampling workbook uses one second", sharedStrings.Contains("1000 ms", StringComparison.Ordinal), true);
+            Assert("Weintek sampling workbook uses IDX1", sharedStrings.Contains("IDX: 1", StringComparison.Ordinal), true);
+            Assert("Weintek sampling workbook configures USB", sharedStrings.Contains("USB Disk", StringComparison.Ordinal), true);
+            Assert("Weintek sampling workbook preserves ninety files", sharedStrings.Contains("90 day(s)/file(s)", StringComparison.Ordinal), true);
+            Assert("Weintek sampling workbook preserves escaped Unicode labels", sharedStrings.Contains("Analog &amp; O2 😀", StringComparison.Ordinal), true);
+            Assert("Weintek sampling workbook applies one decimal", sharedStrings.Contains("Right of decimal Pt. 1", StringComparison.Ordinal), true);
+            string worksheet = Encoding.UTF8.GetString(ReadZipEntry(samplingArchive, "xl/worksheets/sheet1.xml"));
+            Assert("Weintek sampling workbook emits explicit empty cells", worksheet.Contains("<c r=\"B2\" t=\"s\"><v>2</v></c>", StringComparison.Ordinal), true);
+            IReadOnlyDictionary<string, string> cells = ResolveSharedStringCells(samplingArchive);
+            Assert("Weintek sampling first section marker", cells["A2"], "Data Sampling");
+            Assert("Weintek sampling first interval", cells["D3"], "1000 ms");
+            Assert("Weintek sampling first base cell", cells["G5"], "1");
+            Assert("Weintek sampling first index cell", cells["H5"], "IDX: 1");
+            Assert("Weintek sampling second section row", cells["A17"], "Data Sampling");
+            Assert("Weintek sampling second base cell", cells["G20"], "33");
+            Assert("Weintek sampling analog section row", cells["A31"], "Data Sampling");
+            Assert("Weintek sampling analog base cell", cells["G34"], "257");
+            Assert("Weintek sampling analog record label", cells["C36"], "Analog & O2 😀");
+            XNamespace spreadsheetNs = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+            XDocument sharedDocument = XDocument.Parse(sharedStrings);
+            XDocument worksheetDocument = XDocument.Parse(worksheet);
+            int workbookCellCount = worksheetDocument.Descendants(spreadsheetNs + "c").Count();
+            int workbookUniqueCount = sharedDocument.Descendants(spreadsheetNs + "si").Count();
+            Assert("Weintek shared-string count matches cells", int.Parse(
+                sharedDocument.Root?.Attribute("count")?.Value ?? "-1", CultureInfo.InvariantCulture), workbookCellCount);
+            Assert("Weintek shared-string unique count matches entries", int.Parse(
+                sharedDocument.Root?.Attribute("uniqueCount")?.Value ?? "-1", CultureInfo.InvariantCulture), workbookUniqueCount);
+        }
 
         var patchCfg = new Mx43Config();
         patchCfg.Sensors.Add(new Sensor
@@ -621,6 +729,29 @@ internal static class Program
     }
 
     private static int IndexOf(byte[] data, string value) => IndexOf(data, Encoding.ASCII.GetBytes(value));
+
+    private static byte[] ReadZipEntry(ZipArchive archive, string name)
+    {
+        ZipArchiveEntry entry = archive.GetEntry(name) ?? throw new InvalidOperationException($"ZIP entry not found: {name}");
+        using Stream input = entry.Open();
+        using var output = new MemoryStream();
+        input.CopyTo(output);
+        return output.ToArray();
+    }
+
+    private static IReadOnlyDictionary<string, string> ResolveSharedStringCells(ZipArchive archive)
+    {
+        XNamespace ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+        XDocument sharedDocument = XDocument.Parse(Encoding.UTF8.GetString(ReadZipEntry(archive, "xl/sharedStrings.xml")));
+        string[] sharedStrings = sharedDocument.Descendants(ns + "si")
+            .Select(item => item.Element(ns + "t")?.Value ?? "")
+            .ToArray();
+        XDocument worksheet = XDocument.Parse(Encoding.UTF8.GetString(ReadZipEntry(archive, "xl/worksheets/sheet1.xml")));
+        return worksheet.Descendants(ns + "c").ToDictionary(
+            cell => cell.Attribute("r")?.Value ?? throw new InvalidOperationException("Worksheet cell has no reference."),
+            cell => sharedStrings[int.Parse(cell.Element(ns + "v")?.Value ?? "-1", CultureInfo.InvariantCulture)],
+            StringComparer.Ordinal);
+    }
 
     private static int IndexOf(byte[] data, byte[] value)
     {

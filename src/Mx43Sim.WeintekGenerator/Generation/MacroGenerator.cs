@@ -18,7 +18,7 @@ internal static class MacroGenerator
             File.Delete(staleFile);
         foreach (int id in ExtractorMacroIds)
         {
-            foreach (string staleFile in Directory.GetFiles(macroDirectory, $"{id}_Info Extractor *.ebm"))
+            foreach (string staleFile in Directory.GetFiles(macroDirectory, $"{id}_*.ebm"))
                 File.Delete(staleFile);
         }
 
@@ -84,10 +84,24 @@ internal static class MacroGenerator
     {
         string source = RenderRuntimeSampler(detectors);
         string macroDirectory = Path.Combine(outputDir, "macros");
+        foreach (string staleFile in Directory.GetFiles(macroDirectory, "10_*.ebm"))
+            File.Delete(staleFile);
         File.WriteAllText(Path.Combine(macroDirectory, "runtime-sampler.txt"), source);
         File.WriteAllBytes(
             Path.Combine(macroDirectory, "10_Runtime Sampler.ebm"),
             EncodeEbm(RenderEbm(10, "Runtime Sampler", startup: true, periodicInterval: 10, source)));
+    }
+
+    internal static void WriteProjectInitializer(string outputDir, string projectTitle)
+    {
+        string source = RenderProjectInitializer(projectTitle);
+        string macroDirectory = Path.Combine(outputDir, "macros");
+        foreach (string staleFile in Directory.GetFiles(macroDirectory, "11_*.ebm"))
+            File.Delete(staleFile);
+        File.WriteAllText(Path.Combine(macroDirectory, "project-initializer.txt"), source);
+        File.WriteAllBytes(
+            Path.Combine(macroDirectory, "11_Project Initializer.ebm"),
+            EncodeEbm(RenderEbm(11, "Project Initializer", startup: true, periodicInterval: null, source)));
     }
 
     internal static string RenderEbm(int id, string name, bool startup, int? periodicInterval, string macroSource)
@@ -152,6 +166,30 @@ internal static class MacroGenerator
             sb.AppendLine($"SetData(Det{d.ScreenNo}_AlarmSeverity, \"cMT\", LW, {d.LwAlarmSeverity}, 1) // 0 normal, 1 yellow, 2 orange, 3 red");
             sb.AppendLine();
         }
+        sb.AppendLine("end macro_command");
+        return sb.ToString();
+    }
+
+    internal static string RenderProjectInitializer(string projectTitle)
+    {
+        if (projectTitle.Length > WeintekLayout.ProjectTitleLength)
+            throw new ArgumentException($"Project title must contain at most {WeintekLayout.ProjectTitleLength} UTF-16 code units.", nameof(projectTitle));
+
+        var sb = new StringBuilder();
+        sb.AppendLine("macro_command main()");
+        sb.AppendLine();
+        sb.AppendLine($"short ProjectTitle[{WeintekLayout.ProjectTitleLength}]");
+        sb.AppendLine($"short MeasurementAddressIndex = {WeintekLayout.MeasurementAddressIndexValue}");
+        sb.AppendLine();
+        for (int i = 0; i < WeintekLayout.ProjectTitleLength; i++)
+        {
+            int codeUnit = i < projectTitle.Length ? projectTitle[i] : 0;
+            sb.AppendLine($"ProjectTitle[{i}] = 0x{codeUnit:X4}");
+        }
+        sb.AppendLine();
+        sb.AppendLine($"SetData(ProjectTitle[0], \"cMT\", LW, {WeintekLayout.ProjectTitleLw}, {WeintekLayout.ProjectTitleLength})");
+        sb.AppendLine($"SetData(MeasurementAddressIndex, \"cMT\", LW, {WeintekLayout.MeasurementAddressIndexLw}, 1)");
+        sb.AppendLine();
         sb.AppendLine("end macro_command");
         return sb.ToString();
     }

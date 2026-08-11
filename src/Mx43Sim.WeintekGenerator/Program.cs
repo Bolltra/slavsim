@@ -34,7 +34,12 @@ internal static class Program
         string outputDir = DefaultOutputDir(cfgPath);
         string? templateCxob = null;
         string? cxobOutput = null;
-        bool allowBinaryExpansion = false;
+        string? projectTitleOverride = null;
+        string? storageKeyOverride = null;
+        int samplingIntervalMilliseconds = 1000;
+        int preservationFiles = 90;
+        int autoSyncMinutes = 60;
+        bool allowBinaryExpansion = true;
         for (int i = 1; i < args.Length; i++)
         {
             if (args[i] is "-o" or "--output")
@@ -68,6 +73,40 @@ internal static class Program
             {
                 allowBinaryExpansion = true;
             }
+            else if (args[i] == "--preserve-binary-length")
+            {
+                allowBinaryExpansion = false;
+            }
+            else if (args[i] == "--project-title")
+            {
+                if (i + 1 >= args.Length)
+                {
+                    Console.Error.WriteLine("Missing value after --project-title");
+                    return 2;
+                }
+                projectTitleOverride = args[++i];
+            }
+            else if (args[i] == "--storage-key")
+            {
+                if (i + 1 >= args.Length)
+                {
+                    Console.Error.WriteLine("Missing value after --storage-key");
+                    return 2;
+                }
+                storageKeyOverride = args[++i];
+            }
+            else if (args[i] == "--sampling-interval-ms")
+            {
+                if (!TryReadPositiveInt(args, ref i, "--sampling-interval-ms", out samplingIntervalMilliseconds)) return 2;
+            }
+            else if (args[i] == "--history-files")
+            {
+                if (!TryReadPositiveInt(args, ref i, "--history-files", out preservationFiles)) return 2;
+            }
+            else if (args[i] == "--sync-minutes")
+            {
+                if (!TryReadPositiveInt(args, ref i, "--sync-minutes", out autoSyncMinutes)) return 2;
+            }
             else
             {
                 Console.Error.WriteLine($"Unknown argument: {args[i]}");
@@ -75,48 +114,96 @@ internal static class Program
             }
         }
 
+        if (cxobOutput is not null && templateCxob is null)
+        {
+            Console.Error.WriteLine("--cxob-output requires --template-cxob.");
+            return 2;
+        }
+        if (templateCxob is not null && !File.Exists(templateCxob))
+        {
+            Console.Error.WriteLine($"Template CXOB file not found: {templateCxob}");
+            return 2;
+        }
+        if (templateCxob is not null)
+            cxobOutput ??= Path.Combine(outputDir, Path.GetFileNameWithoutExtension(cfgPath) + ".patched-template.cxob");
+
         var cfg = new Mx43CfgParser(cfgPath).Parse();
         var detectors = DetectorPlanner.Create(cfg);
+        if (detectors.Length is < 1 or > 32)
+        {
+            Console.Error.WriteLine($"The current Weintek template supports 1..32 detectors; CFG contains {detectors.Length}.");
+            return 2;
+        }
+        string projectTitle;
+        try
+        {
+            projectTitle = ResolveProjectTitle(cfg.ProjectName, projectTitleOverride);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return 2;
+        }
+        string storageKey = string.IsNullOrWhiteSpace(storageKeyOverride)
+            ? Path.GetFileNameWithoutExtension(cfgPath)
+            : storageKeyOverride.Trim();
+        var samplingPolicy = new DataSamplingGenerator.SamplingPolicy(
+            samplingIntervalMilliseconds,
+            preservationFiles,
+            autoSyncMinutes);
+        try
+        {
+            DataSamplingGenerator.ValidatePolicy(samplingPolicy);
+        }
+        catch (ArgumentOutOfRangeException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return 2;
+        }
 
         Directory.CreateDirectory(outputDir);
         Directory.CreateDirectory(Path.Combine(outputDir, "macros"));
         Directory.CreateDirectory(Path.Combine(outputDir, "tags"));
 
-        WritePlanJson(outputDir, cfg, detectors);
+        WritePlanJson(outputDir, cfg, projectTitle, storageKey, samplingPolicy, detectors);
         WriteDetectorCsv(outputDir, detectors);
         WriteTrendChannelsCsv(outputDir, detectors);
         WriteMx43TagCsv(outputDir, detectors);
         WriteLocalTagCsv(outputDir, detectors);
         AddressTagLibraryGenerator.Write(outputDir, detectors);
+        DataSamplingGenerator.Write(outputDir, detectors, storageKey, samplingPolicy);
         MacroGenerator.WriteConfigExtractors(outputDir, detectors);
         MacroGenerator.WriteRuntimeSampler(outputDir, detectors);
-        WriteReadme(outputDir, cfgPath, cfg, detectors);
+        MacroGenerator.WriteProjectInitializer(outputDir, projectTitle);
+        WriteReadme(outputDir, cfgPath, cfg, projectTitle, storageKey, samplingPolicy, detectors);
 
         if (templateCxob is not null)
         {
-            if (!File.Exists(templateCxob))
+            try
             {
-                Console.Error.WriteLine($"Template CXOB file not found: {templateCxob}");
+                PatchCxobTemplate(templateCxob, cxobOutput!, detectors, allowBinaryExpansion);
+                Console.WriteLine($"Generated template-patched CXOB: {cxobOutput}");
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or InvalidDataException or IOException)
+            {
+                Console.Error.WriteLine($"CXOB patch failed: {ex.Message}");
                 return 2;
             }
-
-            cxobOutput ??= Path.Combine(outputDir, Path.GetFileNameWithoutExtension(cfgPath) + ".generated.cxob");
-            PatchCxobTemplate(templateCxob, cxobOutput, detectors, allowBinaryExpansion);
-            Console.WriteLine($"Generated template-patched CXOB: {cxobOutput}");
         }
+        WriteImportInstructions(outputDir, projectTitle, storageKey, samplingPolicy, detectors, cxobOutput);
 
         Console.WriteLine($"Generated Weintek artifacts for {detectors.Length} detector(s): {outputDir}");
-        Console.WriteLine("Next step: import/map the generated tags/macros into an EasyBuilder Pro cMT template or patch a decompiled project.");
+        Console.WriteLine("Next step: follow IMPORT.md and full compile the customer CXOB in EasyBuilder Pro.");
         return 0;
     }
 
     private static void PrintUsage()
     {
         Console.WriteLine("Usage:");
-        Console.WriteLine("  dotnet run --project src/Mx43Sim.WeintekGenerator/Mx43Sim.WeintekGenerator.csproj -- <file.cfg> [-o output-dir] [--template-cxob template.cxob] [--cxob-output out.cxob] [--allow-binary-expansion]");
+        Console.WriteLine("  dotnet run --project src/Mx43Sim.WeintekGenerator/Mx43Sim.WeintekGenerator.csproj -- <file.cfg> [-o output-dir] [--project-title title] [--storage-key key] [--sampling-interval-ms 1000] [--history-files 90] [--sync-minutes 60] [--template-cxob template.cxob] [--cxob-output out.cxob] [--preserve-binary-length]");
         Console.WriteLine();
-        Console.WriteLine("  Default CXOB patching preserves project payload length for EasyBuilder decompile/password compatibility.");
-        Console.WriteLine("  --allow-binary-expansion is experimental and may make password-protected CXOB files fail decompile.");
+        Console.WriteLine("  Default CXOB patching uses the validated variable-length expansion path.");
+        Console.WriteLine("  --preserve-binary-length keeps the old conservative mode and may produce partial output with short template slots.");
     }
 
     private static string DefaultOutputDir(string cfgPath)
@@ -126,15 +213,53 @@ internal static class Program
         return Path.Combine(dir, name + ".weintek");
     }
 
-    private static void WritePlanJson(string outputDir, Mx43Config cfg, DetectorPlan[] detectors)
+    internal static string ResolveProjectTitle(string cfgProjectName, string? projectTitleOverride)
+    {
+        string title = projectTitleOverride ?? cfgProjectName;
+        if (string.IsNullOrWhiteSpace(title)) title = "MX43";
+        title = title.Trim();
+        if (title.Length > ProjectTitleLength)
+            throw new InvalidOperationException($"Project title must contain at most {ProjectTitleLength} UTF-16 code units: '{title}'.");
+        return title;
+    }
+
+    private static bool TryReadPositiveInt(string[] args, ref int index, string option, out int value)
+    {
+        value = 0;
+        if (index + 1 >= args.Length || !int.TryParse(args[index + 1], NumberStyles.None, CultureInfo.InvariantCulture, out value) || value <= 0)
+        {
+            Console.Error.WriteLine($"{option} requires a positive integer.");
+            return false;
+        }
+        index++;
+        return true;
+    }
+
+    private static void WritePlanJson(
+        string outputDir,
+        Mx43Config cfg,
+        string projectTitle,
+        string storageKey,
+        DataSamplingGenerator.SamplingPolicy samplingPolicy,
+        DetectorPlan[] detectors)
     {
         var plan = new
         {
             generator = "Mx43Sim.WeintekGenerator",
             projectName = cfg.ProjectName,
+            projectTitle,
+            dataSampling = new
+            {
+                storageKey,
+                intervalMilliseconds = samplingPolicy.IntervalMilliseconds,
+                preservationFiles = samplingPolicy.PreservationFiles,
+                autoSyncMinutes = samplingPolicy.AutoSyncMinutes,
+            },
             detectorCount = detectors.Length,
             localLwLayout = new
             {
+                projectTitle = ProjectTitleLw,
+                projectTitleLength = ProjectTitleLength,
                 stride = LwStride,
                 name = LwNameOffset,
                 status = LwStatusOffset,
@@ -234,6 +359,7 @@ internal static class Program
     {
         var sb = new StringBuilder();
         sb.AppendLine("Name,Device,Kind,Register,Length,Comment");
+        WriteTagRow(sb, "Project-Title", "cMT", "LW", ProjectTitleLw, ProjectTitleLength, "HMI project title, Unicode one character per word");
         foreach (var d in detectors)
         {
             WriteTagRow(sb, $"Det{d.ScreenNo}-Name", "cMT", "LW", d.LwName, 16, "Detector label");
@@ -267,13 +393,22 @@ internal static class Program
         sb.AppendLine();
     }
 
-    private static void WriteReadme(string outputDir, string cfgPath, Mx43Config cfg, DetectorPlan[] detectors)
+    private static void WriteReadme(
+        string outputDir,
+        string cfgPath,
+        Mx43Config cfg,
+        string projectTitle,
+        string storageKey,
+        DataSamplingGenerator.SamplingPolicy samplingPolicy,
+        DetectorPlan[] detectors)
     {
         var sb = new StringBuilder();
         sb.AppendLine("# Weintek Generator Output");
         sb.AppendLine();
         sb.AppendLine($"Source CFG: `{Path.GetFileName(cfgPath)}`");
         sb.AppendLine($"Project name: `{cfg.ProjectName}`");
+        sb.AppendLine($"HMI title: `{projectTitle}`");
+        sb.AppendLine($"History storage key: `{storageKey}`");
         sb.AppendLine($"Detectors: `{detectors.Length}`");
         sb.AppendLine();
         sb.AppendLine("## Files");
@@ -285,10 +420,13 @@ internal static class Program
         sb.AppendLine("- `tags/local-lw-tags.csv`: review manifest for local cMT LW tags used by generated macros and objects.");
         sb.AppendLine("- `tags/mx43-address-tag-library.csv`: EasyBuilder Address Tag Library import for active MX43 tags.");
         sb.AppendLine("- `tags/local-lw-address-tag-library.csv`: EasyBuilder Address Tag Library import for generated local cMT LW tags.");
+        sb.AppendLine($"- `data-sampling.xlsx`: EasyBuilder Data Sampling import for every active detector, with {samplingPolicy.IntervalMilliseconds} ms sampling and USB history.");
         sb.AppendLine("- `macros/config-extractor_*.txt`: reads the 68-register MX43 config block into local LW memory.");
         sb.AppendLine("- `macros/runtime-sampler.txt`: periodically reads live measurements and alarm bits.");
         sb.AppendLine("- `macros/*.ebm`: EasyBuilder Pro 6.10.02 macro imports with startup/periodic metadata.");
-        sb.AppendLine("- `*.generated.cxob`: optional output when `--template-cxob` is used. This is a conservative template patch, not a full EasyBuilder compile.");
+        sb.AppendLine("- `macros/11_Project Initializer.ebm`: initializes the HMI title and measurement address index.");
+        sb.AppendLine("- `IMPORT.md`: exact EasyBuilder assembly and verification order.");
+        sb.AppendLine("- `*.patched-template.cxob`: optional output when `--template-cxob` is used. This is an import template, not a full EasyBuilder compile.");
         sb.AppendLine("- `*.template-report.md`: optional report describing the template's available fixed-width slots.");
         sb.AppendLine("- `*.warnings.txt`: patch notices and warnings. Expansion notices are informational; skipped, missing or truncated fields mean the `.cxob` is partial.");
         sb.AppendLine();
@@ -308,14 +446,76 @@ internal static class Program
         sb.AppendLine();
         sb.AppendLine("## Trend Approach");
         sb.AppendLine();
-        sb.AppendLine("Trend data should sample `DetN-Measurement` and display it with the same decimal setting as the detector value. The source cMT project already uses Weintek data sampling/trend concepts; this generator provides deterministic tag names and addresses so those objects can be generated or patched from a template.");
+        sb.AppendLine("`data-sampling.xlsx` samples each contiguous MX43 measurement range through address index 1 and applies each detector's decimal setting. Bind template Trend Display objects to the imported groups in `IMPORT.md` order.");
         sb.AppendLine();
         sb.AppendLine("## CXOB Patch Modes");
         sb.AppendLine();
-        sb.AppendLine("Default `.cxob` patching preserves the original `project` payload length. This is the mode to use when the output must decompile in EasyBuilder with the template password, but too-short fields may be truncated or skipped with warnings.");
+        sb.AppendLine("Default `.cxob` patching rebuilds mapped variable-length label/tag sections, project lengths and relocation metadata. Generation fails if any required active `info-Dn` tag is missing or has the wrong address after patching.");
         sb.AppendLine();
-        sb.AppendLine("`--allow-binary-expansion` rebuilds mapped variable-length label/tag sections, project lengths and known relocation metadata so longer labels and addresses fit. EasyBuilder 6.10.02 has successfully decompiled and recompiled digital and analog expanded files, preserving all active `info-Dn` addresses. Unreferenced `Det-N` label records are discarded by EasyBuilder, so display names must be driven by referenced template objects/local LW data rather than detached label placeholders.");
+        sb.AppendLine("`--preserve-binary-length` enables the old diagnostic mode and can fail when required addresses do not fit. EasyBuilder 6.10.02 has successfully decompiled and recompiled digital and analog expanded files. Unreferenced `Det-N` label records are discarded by EasyBuilder, so display names must be driven by referenced template objects/local LW data rather than detached label placeholders.");
         File.WriteAllText(Path.Combine(outputDir, "README.md"), sb.ToString());
+    }
+
+    private static void WriteImportInstructions(
+        string outputDir,
+        string projectTitle,
+        string storageKey,
+        DataSamplingGenerator.SamplingPolicy samplingPolicy,
+        DetectorPlan[] detectors,
+        string? patchedCxobOutput)
+    {
+        DataSamplingGenerator.SamplingGroup[] groups = DataSamplingGenerator.CreateGroups(detectors, storageKey);
+        var sb = new StringBuilder();
+        sb.AppendLine("# EasyBuilder Assembly");
+        sb.AppendLine();
+        sb.AppendLine($"Project title: `{projectTitle}`");
+        sb.AppendLine($"History storage key: `{storageKey}`");
+        sb.AppendLine($"Detectors: `{detectors.Length}`");
+        sb.AppendLine($"Data Sampling groups: `{groups.Length}`");
+        sb.AppendLine();
+        if (patchedCxobOutput is null)
+            sb.AppendLine("This bundle contains import artifacts for a maintained cMT template. EasyBuilder Pro 6.10.02.300 must perform the final full compile.");
+        else
+            sb.AppendLine("The patched CXOB is an import template, not the deployable customer file. EasyBuilder Pro 6.10.02.300 must perform the final full compile.");
+        sb.AppendLine();
+        sb.AppendLine("## Import Order");
+        sb.AppendLine();
+        if (patchedCxobOutput is null)
+            sb.AppendLine("1. Open the maintained cMT template in EasyBuilder. No patched CXOB was requested for this generation run.");
+        else
+            sb.AppendLine($"1. Decompile `{patchedCxobOutput}` in EasyBuilder. Enter the template password if requested; the known sample templates use `111111`.");
+        sb.AppendLine("2. Import `tags/mx43-address-tag-library.csv`. Replace same-named `info-Dn` tags when EasyBuilder asks.");
+        sb.AppendLine("3. Import `tags/local-lw-address-tag-library.csv`. Replace same-named local detector tags when EasyBuilder asks.");
+        sb.AppendLine("4. Import macro IDs `5`, `7`, `8`, `9`, `10` and `11` from `macros/*.ebm`, replacing macros with the same IDs.");
+        sb.AppendLine("5. Remove old Data Sampling definitions that read MX43 measurements, then import `data-sampling.xlsx` to avoid duplicate logging.");
+        sb.AppendLine("6. Bind each Trend Display to the corresponding imported Data Sampling group in the order listed below.");
+        sb.AppendLine("7. Ensure the maintained template has one read-only Unicode ASCII display bound to `cMT` `LW-3300`, length 16 words, on the common/header window.");
+        sb.AppendLine("8. Full compile to the final customer CXOB and run the offline simulator before deployment.");
+        sb.AppendLine();
+        sb.AppendLine("## Data Sampling Groups");
+        sb.AppendLine();
+        sb.AppendLine($"All groups sample every {samplingPolicy.IntervalMilliseconds} ms, synchronize to USB every {samplingPolicy.AutoSyncMinutes} minutes and preserve up to {samplingPolicy.PreservationFiles} customized files. Macro ID 11 initializes `LW-9201` to `2000`, so each configuration base resolves to its live measurement range.");
+        sb.AppendLine();
+        double backlogHours = 9000d * samplingPolicy.IntervalMilliseconds / 3_600_000d;
+        sb.AppendLine($"When USB is absent, EasyBuilder keeps only a finite HMI backlog. The documented USB-mode limit is roughly 9000 records per sampling group before older disconnected-period data can be discarded; at {samplingPolicy.IntervalMilliseconds} ms this is about {backlogHours.ToString("0.##", CultureInfo.InvariantCulture)} hours. `Sync Status Address` remains Off because no validated status-address export has been supplied.");
+        sb.AppendLine();
+        sb.AppendLine("| Group | Config base | Effective measurement range | Records | USB folder |");
+        sb.AppendLine("|---:|---:|---:|---:|---|");
+        foreach (DataSamplingGenerator.SamplingGroup group in groups)
+        {
+            int firstMeasurement = group.Detectors[0].MeasurementRegister;
+            int lastMeasurement = group.Detectors[^1].MeasurementRegister;
+            sb.AppendLine($"| {group.Number} | {group.BaseConfigRegister} | {firstMeasurement}..{lastMeasurement} | {group.Detectors.Count} | `{group.FolderName}` |");
+        }
+        sb.AppendLine();
+        sb.AppendLine("## Acceptance Checks");
+        sb.AppendLine();
+        sb.AppendLine($"- The header displays `{projectTitle}`.");
+        sb.AppendLine("- Every active detector shows its CFG label, gas, unit, range and thresholds.");
+        sb.AppendLine("- Live values and alarm colors update from the simulator.");
+        sb.AppendLine("- Data Sampling continues while USB is absent only within the finite HMI backlog; absence does not provide long-term history.");
+        sb.AppendLine("- Reinserting USB allows subsequent synchronization; safely remove USB before unplugging it during a write.");
+        File.WriteAllText(Path.Combine(outputDir, "IMPORT.md"), sb.ToString());
     }
 
     private static void PatchCxobTemplate(string templateCxob, string outputCxob, DetectorPlan[] detectors, bool allowBinaryExpansion)
@@ -377,8 +577,24 @@ internal static class Program
         }
         PatchDetectorLabels(project, detectors, warnings);
         PatchInfoTags(project, detectors, warnings);
+        ValidateActiveInfoTags(project, detectors);
         ValidateProjectStructure(project);
         return new ProjectPatchResult(project, warnings.Distinct(StringComparer.Ordinal).ToArray());
+    }
+
+    private static void ValidateActiveInfoTags(byte[] project, IReadOnlyList<DetectorPlan> detectors)
+    {
+        TagRecord[] tags = ParseTags(project).ToArray();
+        foreach (DetectorPlan detector in detectors)
+        {
+            string name = $"info-D{detector.ScreenNo}";
+            TagRecord? tag = tags.FirstOrDefault(candidate => candidate.Name == name);
+            string expected = detector.ConfigRegister.ToString(CultureInfo.InvariantCulture);
+            if (tag is null)
+                throw new InvalidOperationException($"Template is missing required tag {name}.");
+            if (tag.Address != expected)
+                throw new InvalidOperationException($"Required tag {name} has address '{tag.Address}', expected '{expected}'.");
+        }
     }
 
     private static string FindProjectPayloadPath(string cxobRoot)

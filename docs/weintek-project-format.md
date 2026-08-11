@@ -157,11 +157,27 @@ comments.
 ## Data Sampling Export
 
 The verified `.xlsx` is a version 4 EasyBuilder Data Sampling settings export,
-not historical sampled data. It contains two Volvo-specific raw `MX43`/`3x`
-groups at bases `1` and `33`. Address indexes initialized to `2000` make their
-effective measurement ranges `2001..2003` and `2033..2048`. Sampling intervals,
-storage destination, retention, folder names and filename policy are project
-settings that cannot be derived safely from an MX43 CFG alone.
+not historical sampled data. It contains positional sections rather than a
+normal table. Each section declares a time-based interval, one raw `MX43`/`3x`
+base, consecutive signed 16-bit records, decimal formatting, history target,
+retention and synchronization policy.
+
+The generator reproduces the seven-part OOXML package without external
+dependencies. It creates one section per contiguous measurement range, uses the
+corresponding configuration base with `IDX: 1`, and relies on generated startup
+macro ID `11` to write `2000` to `LW-9201`. Defaults are 1000 ms sampling, USB
+history, preservation of 90 customized files and synchronization every 60
+minutes. The three policy values are CLI-overridable within EasyBuilder's
+documented ranges. Channel descriptions and decimal positions come from the
+CFG. Folder and filename stems include a deterministic hash of the full storage
+key plus the stable configuration base, preventing truncation collisions; the
+customized filename is limited to 25 characters as required by EasyBuilder.
+
+The workbook XML is UTF-8 without BOM. All cells are shared strings, including
+the explicit empty cells used by EasyBuilder's positional grammar. ZIP part
+names, workbook relationships, styles and worksheet layout match the observed
+EasyBuilder Pro 6.10.02.300 export. Import acceptance in EasyBuilder remains
+required because OOXML validity alone cannot validate EasyBuilder semantics.
 
 ## Remaining Unknowns
 

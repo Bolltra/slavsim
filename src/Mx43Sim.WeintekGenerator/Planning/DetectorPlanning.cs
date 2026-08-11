@@ -8,6 +8,10 @@ namespace Mx43Sim.WeintekGenerator;
 
 internal static class WeintekLayout
 {
+    internal const int ProjectTitleLw = 3300;
+    internal const int ProjectTitleLength = 16;
+    internal const int MeasurementAddressIndexLw = 9201;
+    internal const int MeasurementAddressIndexValue = 2000;
     internal const int LwStride = 100;
     internal const int LwNameOffset = 0;
     internal const int LwStatusOffset = 16;
