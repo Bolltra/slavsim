@@ -18,7 +18,7 @@ namespace Mx43Sim.Core.Modbus;
 /// Reading one DETECTORS CONFIGURATION request address returns a virtual
 /// 68-register block for that detector. Within that block:
 ///   +0   DETECTOR LABEL             (2 x 16 wchar = 16 registers)
-///   +16  STATUS                      (1 register)
+///   +16  STATUS                      (1 register / 2 octets: ON=1, OFF=0)
 ///   +17  Gas name                    (2 x 20 wchar = 20 registers)
 ///   +37  Range                       (1 register)
 ///   +38  Display format              (1 register)

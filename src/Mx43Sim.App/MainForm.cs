@@ -20,6 +20,7 @@ public sealed class MainForm : Form
     private Mx43ModbusServer? _server;
     private Mx43Config? _config;
     private bool _syncingMeasurementEditor;
+    private bool _syncingDetectorStatus;
     private bool _updatingGrid;
 
     private readonly TextBox _log = new();
@@ -38,6 +39,7 @@ public sealed class MainForm : Form
     private readonly Label _lblSelGas = new() { AutoSize = true };
     private readonly Label _lblSelRange = new() { AutoSize = true };
     private readonly Label _lblSelThresh = new() { AutoSize = true };
+    private readonly CheckBox _chkDetectorOn = new() { Text = "ON (STATUS = 1)", AutoSize = true };
     private readonly NumericUpDown _numMeas = new() { Minimum = -32768, Maximum = 32767, Value = 0 };
     private readonly TrackBar _trkMeas = new() { Minimum = -32768, Maximum = 32767, TickFrequency = 1000 };
     private readonly Button _btnApply = new() { Text = "Sätt värde (larm räknas ut)" };
@@ -75,6 +77,7 @@ public sealed class MainForm : Form
         _grid.Columns.Add("det", "Det");
         _grid.Columns.Add("kind", "Typ");
         _grid.Columns.Add("label", "Label");
+        _grid.Columns.Add(new DataGridViewCheckBoxColumn { Name = "status", HeaderText = "ON" });
         _grid.Columns.Add("gas", "Gas");
         _grid.Columns.Add("unit", "Enhet");
         _grid.Columns.Add("range", "Range");
@@ -110,7 +113,14 @@ public sealed class MainForm : Form
         _btnClear.Click += (_, _) => ClearAlarms();
         _trkMeas.Scroll += (_, _) => SyncMeasurementNumberFromTrackBar();
         _numMeas.ValueChanged += (_, _) => SyncTrackBarFromMeasurementNumber();
+        _chkDetectorOn.CheckedChanged += (_, _) => ApplyDetectorStatus();
         _grid.SelectionChanged += (_, _) => OnSelectionChanged();
+        _grid.CurrentCellDirtyStateChanged += (_, _) =>
+        {
+            if (_grid.IsCurrentCellDirty && _grid.CurrentCell?.OwningColumn?.Name == "status")
+                _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+        };
+        _grid.CellValueChanged += OnGridCellValueChanged;
         _grid.CellValidating += OnGridCellValidating;
         _grid.CellEndEdit += OnGridCellEndEdit;
         _grid.DataError += (_, e) => { e.ThrowException = false; };
@@ -132,17 +142,20 @@ public sealed class MainForm : Form
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         layout.Controls.Add(_lblSel, 0, 0);       layout.SetColumnSpan(_lblSel, 2);
         layout.Controls.Add(_lblSelGas, 0, 1);    layout.SetColumnSpan(_lblSelGas, 2);
         layout.Controls.Add(_lblSelRange, 0, 2);  layout.SetColumnSpan(_lblSelRange, 2);
         layout.Controls.Add(_lblSelThresh, 0, 3); layout.SetColumnSpan(_lblSelThresh, 2);
-        layout.Controls.Add(new Label { Text = "Mätvärde:", AutoSize = true }, 0, 4);
-        layout.Controls.Add(_numMeas, 1, 4);
-        layout.Controls.Add(_trkMeas, 0, 5);       layout.SetColumnSpan(_trkMeas, 2);
-        layout.Controls.Add(_btnApply, 0, 6);
-        layout.Controls.Add(_btnClear, 1, 6);
-        layout.Controls.Add(_lblAlarms, 0, 7);    layout.SetColumnSpan(_lblAlarms, 2);
+        layout.Controls.Add(new Label { Text = "Detektor:", AutoSize = true }, 0, 4);
+        layout.Controls.Add(_chkDetectorOn, 1, 4);
+        layout.Controls.Add(new Label { Text = "Mätvärde:", AutoSize = true }, 0, 5);
+        layout.Controls.Add(_numMeas, 1, 5);
+        layout.Controls.Add(_trkMeas, 0, 6);       layout.SetColumnSpan(_trkMeas, 2);
+        layout.Controls.Add(_btnApply, 0, 7);
+        layout.Controls.Add(_btnClear, 1, 7);
+        layout.Controls.Add(_lblAlarms, 0, 8);    layout.SetColumnSpan(_lblAlarms, 2);
 
         _grpEditor.Controls.Add(layout);
     }
@@ -217,6 +230,16 @@ public sealed class MainForm : Form
         _lblSelThresh.Text = $"Tröskelvärden:  A1={s.Thresholds.Inst1}   A2={s.Thresholds.Inst2}   A3={s.Thresholds.Inst3}   " +
                              $"Under={s.Thresholds.Underscale}   Över={s.Thresholds.Overscale}   OOR={s.Thresholds.OutOfRange}";
         var d = _sim.Store.Detectors[s.Index];
+        _syncingDetectorStatus = true;
+        try
+        {
+            _chkDetectorOn.Checked = d.Enabled;
+            _chkDetectorOn.Text = d.Enabled ? "ON (STATUS = 1)" : "OFF (STATUS = 0)";
+        }
+        finally
+        {
+            _syncingDetectorStatus = false;
+        }
         ConfigureMeasurementEditorRange(s, d.Measurement);
         _lblAlarms.Text = "Aktiva larm: " + d.ActiveAlarms;
         _lblAlarms.ForeColor = d.ActiveAlarms == AlarmBits.None ? Color.Black : Color.Red;
@@ -234,7 +257,7 @@ public sealed class MainForm : Form
         var d = _sim.Store.Detectors[s.Index];
         row.Cells["meas"].Value = d.Measurement;
         row.Cells["alarms"].Value = d.ActiveAlarms.ToString();
-        row.DefaultCellStyle.BackColor = d.ActiveAlarms == AlarmBits.None ? Color.Empty : Color.MistyRose;
+        RefreshGridRowAppearance(row, d);
         _lblAlarms.Text = "Aktiva larm: " + d.ActiveAlarms;
         _lblAlarms.ForeColor = d.ActiveAlarms == AlarmBits.None ? Color.Black : Color.Red;
         Log($"L{line}D{det} = {v}  alarms=0x{(ushort)d.ActiveAlarms:X4}");
@@ -247,11 +270,26 @@ public sealed class MainForm : Form
         int line = s.Line;
         int det = s.Detector;
         _sim.SetAlarm(line, det, AlarmBits.None);
+        var d = _sim.Store.Detectors[s.Index];
         row.Cells["alarms"].Value = AlarmBits.None.ToString();
-        row.DefaultCellStyle.BackColor = Color.Empty;
+        RefreshGridRowAppearance(row, d);
         _lblAlarms.Text = "Aktiva larm: None";
         _lblAlarms.ForeColor = Color.Black;
         Log($"L{line}D{det}: alarms cleared");
+    }
+
+    private void ApplyDetectorStatus()
+    {
+        if (_syncingDetectorStatus) return;
+        var row = CurrentGridRow();
+        if (row is null || row.Tag is not Sensor s) return;
+
+        bool enabled = _chkDetectorOn.Checked;
+        _sim.SetEnabled(s, enabled);
+        _chkDetectorOn.Text = enabled ? "ON (STATUS = 1)" : "OFF (STATUS = 0)";
+        row.Cells["status"].Value = enabled;
+        RefreshGridRowAppearance(row, _sim.Store.Detectors[s.Index]);
+        Log($"L{s.Line}D{s.Detector}: STATUS = {(enabled ? "ON (1)" : "OFF (0)")}");
     }
 
     private DataGridViewRow? CurrentGridRow()
@@ -271,6 +309,7 @@ public sealed class MainForm : Form
             row.Cells["det"].Value = s.Detector;
             row.Cells["kind"].Value = s.IsAnalog ? "Analog" : "Digital";
             row.Cells["label"].Value = s.Label;
+            row.Cells["status"].Value = d.Enabled;
             row.Cells["gas"].Value = s.ShortGasName;
             row.Cells["unit"].Value = s.Unit;
             row.Cells["range"].Value = s.Range;
@@ -283,7 +322,7 @@ public sealed class MainForm : Form
             row.Cells["oor"].Value = s.Thresholds.OutOfRange;
             row.Cells["meas"].Value = d.Measurement;
             row.Cells["alarms"].Value = d.ActiveAlarms.ToString();
-            row.DefaultCellStyle.BackColor = d.ActiveAlarms == AlarmBits.None ? Color.Empty : Color.MistyRose;
+            RefreshGridRowAppearance(row, d);
         }
         finally
         {
@@ -421,6 +460,7 @@ public sealed class MainForm : Form
     private void OnGridCellEndEdit(object? sender, DataGridViewCellEventArgs e)
     {
         if (_updatingGrid || e.RowIndex < 0) return;
+        if (_grid.Columns[e.ColumnIndex].Name == "status") return;
         var row = _grid.Rows[e.RowIndex];
         row.ErrorText = "";
         if (row.Tag is not Sensor s) return;
@@ -436,6 +476,17 @@ public sealed class MainForm : Form
             MessageBox.Show(this, "Kunde inte uppdatera värdet: " + ex.Message, "Fel", MessageBoxButtons.OK, MessageBoxIcon.Error);
             RefreshGridRow(row, s);
         }
+    }
+
+    private void OnGridCellValueChanged(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (_updatingGrid || e.RowIndex < 0 || e.ColumnIndex < 0 || _grid.Columns[e.ColumnIndex].Name != "status") return;
+        var row = _grid.Rows[e.RowIndex];
+        if (row.Tag is not Sensor s) return;
+
+        _sim.SetEnabled(s, ReadBoolCell(row, "status", _sim.GetEnabled(s)));
+        RefreshGridRowAppearance(row, _sim.Store.Detectors[s.Index]);
+        if (ReferenceEquals(row, CurrentGridRow())) RefreshDetectorEditor(row, s);
     }
 
     private void ApplyGridEdit(DataGridViewRow row, Sensor s, string column)
@@ -507,6 +558,7 @@ public sealed class MainForm : Form
         int oldIndex = s.Index;
         short measurement = _sim.GetMeasurement(s.Line, s.Detector);
         AlarmBits alarms = _sim.GetAlarm(s.Line, s.Detector);
+        bool enabled = _sim.GetEnabled(s);
 
         if (oldIndex >= 0 && oldIndex < _sim.Store.Detectors.Length)
         {
@@ -514,6 +566,7 @@ public sealed class MainForm : Form
             oldState.Config = null;
             oldState.Measurement = 0;
             oldState.ActiveAlarms = AlarmBits.None;
+            oldState.Enabled = false;
         }
 
         s.Line = newLine;
@@ -524,6 +577,7 @@ public sealed class MainForm : Form
         newState.Config = s;
         newState.Measurement = measurement;
         newState.ActiveAlarms = alarms;
+        newState.Enabled = enabled;
         _sim.Repack();
     }
 
@@ -538,6 +592,14 @@ public sealed class MainForm : Form
 
     private static int ReadIntCell(DataGridViewRow row, string column, int fallback)
         => int.TryParse(Convert.ToString(row.Cells[column].Value), out int value) ? value : fallback;
+
+    private static bool ReadBoolCell(DataGridViewRow row, string column, bool fallback)
+        => row.Cells[column].Value is bool value ? value : fallback;
+
+    private static void RefreshGridRowAppearance(DataGridViewRow row, DetectorState detector)
+        => row.DefaultCellStyle.BackColor = !detector.Enabled
+            ? Color.Gainsboro
+            : detector.ActiveAlarms == AlarmBits.None ? Color.Empty : Color.MistyRose;
 
     private static bool IsIntegerColumn(string column)
         => column is "line" or "det" or "range" or "format" or "inst1" or "inst2" or "inst3" or "under" or "over" or "oor" or "meas";

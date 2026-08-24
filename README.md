@@ -8,6 +8,7 @@ A lightweight Windows application that simulates a Teledyne/Oldham **MX43** gas-
 - Parse it into a structured model (project, zones, modules, relays, sensors, alarm thresholds).
 - Run a Modbus TCP server that responds to FC3/FC4/FC6/FC16 reads/writes.
 - Let the user set a simulated gas measurement for any detector; the alarm bits are derived automatically from the configured thresholds so the slave display shows the correct colour and value.
+- Let the user switch each detector ON/OFF; its 2-octet STATUS field is exposed as `1`/`0` between the detector name and gas name.
 - **No external NuGet dependencies** — the parser, the Modbus server and the XLSX-style address list are all hand-rolled in `Mx43Sim.Core.dll`.
 
 ## Build

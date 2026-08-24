@@ -48,7 +48,7 @@ public sealed class DetectorState
     /// <summary>Currently latched alarm bits.</summary>
     public AlarmBits ActiveAlarms { get; set; }
 
-    /// <summary>Bit 0 of the STATUS word — ON/OFF.</summary>
+    /// <summary>Detector STATUS word: 1 = ON, 0 = OFF.</summary>
     public bool Enabled { get; set; } = true;
 
     public DetectorState(int line, int detector)

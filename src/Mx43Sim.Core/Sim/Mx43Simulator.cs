@@ -95,6 +95,29 @@ public sealed class Mx43Simulator
         _store.WriteRegU(reg, (ushort)bits);
     }
 
+    /// <summary>Set the detector STATUS word exposed in its configuration block.</summary>
+    public void SetEnabled(int line, int det, bool enabled)
+    {
+        int idx = StateIndexFor(line, det);
+        if (idx < 0 || idx >= _store.Detectors.Length) return;
+        _store.Detectors[idx].Enabled = enabled;
+    }
+
+    public void SetEnabled(Sensor sensor, bool enabled)
+    {
+        if (sensor.Index < 0 || sensor.Index >= _store.Detectors.Length) return;
+        _store.Detectors[sensor.Index].Enabled = enabled;
+    }
+
+    public bool GetEnabled(int line, int det)
+    {
+        int idx = StateIndexFor(line, det);
+        return idx >= 0 && idx < _store.Detectors.Length && _store.Detectors[idx].Enabled;
+    }
+
+    public bool GetEnabled(Sensor sensor)
+        => sensor.Index >= 0 && sensor.Index < _store.Detectors.Length && _store.Detectors[sensor.Index].Enabled;
+
     public short GetMeasurement(int line, int det)
     {
         int idx = StateIndexFor(line, det);

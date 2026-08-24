@@ -205,6 +205,17 @@ internal static class Program
             Thresholds = new AlarmThresholds { Inst1 = 10, Inst2 = 20, Inst3 = 30, Underscale = -5, Overscale = 100, OutOfRange = 110 },
             EnableFlags = AlarmEnable.Inst1 | AlarmEnable.Inst2 | AlarmEnable.Inst3,
         });
+        var analogSensor = new Sensor
+        {
+            Line = 1,
+            Detector = 1,
+            AnalogChannel = 1,
+            Label = "Analog kanal 1",
+            ShortGasName = "O2",
+            Range = 250,
+            DisplayFormat = 1,
+        };
+        cfg.Sensors.Add(analogSensor);
 
         var store = new Mx43RegisterStore();
         var sim = new Mx43Simulator(store);
@@ -222,14 +233,29 @@ internal static class Program
         Assert("config L1D2 short gas", DecodeUtf16(block2, 44, 6), "CH4");
         Assert("config L1D2 Inst1", block2[51], (short)10);
 
+        sim.SetEnabled(1, 2, false);
+        block2 = store.ReadRange(Mx43AddressMap.ConfigBaseFor(1, 2), Mx43AddressMap.ConfigBlockSize);
+        Assert("config L1D2 status OFF", (ushort)block2[16], (ushort)0);
+        Assert("config L1D2 gas remains after status", DecodeUtf16(block2, 17, 20), "CH4");
+        sim.SetEnabled(1, 2, true);
+        Assert("simulated detector status ON", sim.GetEnabled(1, 2), true);
+
+        sim.SetEnabled(analogSensor, false);
+        var analogBlock = store.ReadRange(Mx43AddressMap.AnalogConfigBaseFor(1), Mx43AddressMap.ConfigBlockSize);
+        Assert("analog detector status OFF", (ushort)analogBlock[16], (ushort)0);
+        Assert("overlapping digital detector remains ON", (ushort)store.ReadRange(
+            Mx43AddressMap.ConfigBaseFor(1, 1), Mx43AddressMap.ConfigBlockSize)[16], (ushort)1);
+
         var server = new Mx43ModbusServer(store, 0);
         var fc3 = server.GetType()
             .GetMethod("HandleRequest", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
-            .Invoke(server, new object?[] { (byte)1, (byte)3, new byte[] { 3, 0x00, 0x02, 0x00, 0x10 } });
+            .Invoke(server, new object?[] { (byte)1, (byte)3, new byte[] { 3, 0x00, 0x02, 0x00, 0x11 } });
         var arr = (byte[])fc3!;
         Assert("FC3 config echo", arr[0], (byte)3);
-        Assert("FC3 config byte count", arr[1], (byte)32);
+        Assert("FC3 config byte count", arr[1], (byte)34);
         Assert("FC3 config L1D2 label", DecodeUtf16Response(arr, 2, 16), "Kanal 2");
+        Assert("FC3 config status high octet", arr[34], (byte)0);
+        Assert("FC3 config status low octet", arr[35], (byte)1);
         return 0;
     }
 
