@@ -95,6 +95,25 @@ public sealed class Mx43Simulator
         _store.WriteRegU(reg, (ushort)bits);
     }
 
+    /// <summary>Baseline measurement a detector starts at (O2 = 21.0%, others 0).</summary>
+    public static short BaselineMeasurement(DetectorState d)
+        => d.Config is { ShortGasName: var gas } &&
+           string.Equals(gas, "O2", StringComparison.OrdinalIgnoreCase)
+            ? (short)210
+            : (short)0;
+
+    /// <summary>Reset a detector: measurement back to baseline and alarms cleared.</summary>
+    public void ResetDetector(int line, int det)
+    {
+        int idx = StateIndexFor(line, det);
+        if (idx < 0 || idx >= _store.Detectors.Length) return;
+        var d = _store.Detectors[idx];
+        d.Measurement = BaselineMeasurement(d);
+        d.ActiveAlarms = AlarmBits.None;
+        _store.WriteReg(MeasurementRegFor(d), d.Measurement);
+        _store.WriteRegU(AlarmRegFor(d), (ushort)AlarmBits.None);
+    }
+
     /// <summary>Set the detector STATUS word exposed in its configuration block.</summary>
     public void SetEnabled(int line, int det, bool enabled)
     {

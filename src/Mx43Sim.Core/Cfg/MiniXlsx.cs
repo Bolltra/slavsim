@@ -95,6 +95,49 @@ public static class MiniXlsx
         return grid;
     }
 
+    /// <summary>Write rows of text as a single-sheet .xlsx (numbers stored as numbers).</summary>
+    public static void WriteSheet(string path, IReadOnlyList<string[]> rows)
+    {
+        using var fs = File.Create(path);
+        using var zip = new ZipArchive(fs, ZipArchiveMode.Create);
+        void Add(string name, string content)
+        {
+            var e = zip.CreateEntry(name);
+            using var w = new StreamWriter(e.Open(), new UTF8Encoding(false));
+            w.Write(content);
+        }
+        Add("[Content_Types].xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>");
+        Add("_rels/.rels", "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>");
+        Add("xl/workbook.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Detektorer\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>");
+        Add("xl/_rels/workbook.xml.rels", "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>");
+
+        var sb = new StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>");
+        for (int r = 0; r < rows.Count; r++)
+        {
+            sb.Append("<row r=\"").Append(r + 1).Append("\">");
+            for (int c = 0; c < rows[r].Length; c++)
+            {
+                string cellRef = ColName(c) + (r + 1);
+                string v = rows[r][c] ?? "";
+                if (r > 0 && double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out _))
+                    sb.Append("<c r=\"").Append(cellRef).Append("\"><v>").Append(v).Append("</v></c>");
+                else
+                    sb.Append("<c r=\"").Append(cellRef).Append("\" t=\"inlineStr\"><is><t>")
+                      .Append(System.Security.SecurityElement.Escape(v)).Append("</t></is></c>");
+            }
+            sb.Append("</row>");
+        }
+        sb.Append("</sheetData></worksheet>");
+        Add("xl/worksheets/sheet1.xml", sb.ToString());
+    }
+
+    private static string ColName(int c)
+    {
+        var s = "";
+        for (c++; c > 0; c = (c - 1) / 26) s = (char)('A' + (c - 1) % 26) + s;
+        return s;
+    }
+
     private static void ParseCellRef(string cellRef, out int col1Based, out int row1Based)
     {
         // A1 -> (1, 1), B12 -> (2, 12)

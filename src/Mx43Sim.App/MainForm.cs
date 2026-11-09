@@ -26,6 +26,7 @@ public sealed class MainForm : Form
     private readonly TextBox _log = new();
     private readonly DataGridView _grid = new();
     private readonly Button _btnLoadCfg = new() { Text = "Ladda .cfg..." };
+    private readonly Button _btnExport = new() { Text = "Exportera Excel...", Enabled = false };
     private readonly Button _btnStart = new() { Text = "Starta server", Enabled = false };
     private readonly Button _btnStop = new() { Text = "Stoppa server", Enabled = false };
     private readonly NumericUpDown _numPort = new() { Minimum = 1, Maximum = 65535, Value = 502 };
@@ -43,7 +44,7 @@ public sealed class MainForm : Form
     private readonly NumericUpDown _numMeas = new() { Minimum = -32768, Maximum = 32767, Value = 0 };
     private readonly TrackBar _trkMeas = new() { Minimum = -32768, Maximum = 32767, TickFrequency = 1000 };
     private readonly Button _btnApply = new() { Text = "Sätt värde (larm räknas ut)" };
-    private readonly Button _btnClear = new() { Text = "Nollställ larm" };
+    private readonly Button _btnClear = new() { Text = "Nollställ" };
     private readonly Label _lblAlarms = new() { Text = "Aktiva larm: —", AutoSize = true };
 
     public MainForm()
@@ -56,7 +57,7 @@ public sealed class MainForm : Form
         // Top toolbar
         var top = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 50, Padding = new Padding(8) };
         top.Controls.AddRange(new Control[] {
-            _btnLoadCfg, _lblIp, _lblPort, _numPort, _btnStart, _btnStop, _lblStatus
+            _btnLoadCfg, _btnExport, _lblIp, _lblPort, _numPort, _btnStart, _btnStop, _lblStatus
         });
         Controls.Add(top);
 
@@ -107,6 +108,7 @@ public sealed class MainForm : Form
 
         // Wire up events
         _btnLoadCfg.Click += (_, _) => LoadCfg();
+        _btnExport.Click += (_, _) => ExportExcel();
         _btnStart.Click += async (_, _) => await StartServerAsync();
         _btnStop.Click += async (_, _) => await StopServerAsync();
         _btnApply.Click += (_, _) => ApplyMeasurement();
@@ -176,6 +178,7 @@ public sealed class MainForm : Form
             _sim.Load(_config, AddressList.Default);
             _lblStatus.Text = $"Cfg: {Path.GetFileName(ofd.FileName)} — {_config.Sensors.Count} sensorer, {_config.Zones.Count} zoner, {_config.Modules.Count} moduler";
             _btnStart.Enabled = true;
+            _btnExport.Enabled = true;
             PopulateGrid();
             Log($"Loaded {_config.Sensors.Count} sensors, {_config.OnBoardRelays.Count} on-board relays, {_config.Modules.Count} modules, {_config.Zones.Count} zones");
             if (_config.Modules.Count > 0)
@@ -263,19 +266,51 @@ public sealed class MainForm : Form
         Log($"L{line}D{det} = {v}  alarms=0x{(ushort)d.ActiveAlarms:X4}");
     }
 
+    private static readonly string[] ExcelHeaders =
+        { "Line", "Det", "Typ", "Label", "Gas", "Enhet", "ON", "Mätning" };
+
+    private void ExportExcel()
+    {
+        if (_config is null) return;
+        using var sfd = new SaveFileDialog { Filter = "Excel|*.xlsx", FileName = "mx43-detektorer.xlsx" };
+        if (sfd.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            var rows = new System.Collections.Generic.List<string[]> { ExcelHeaders };
+            foreach (var s in _config.Sensors)
+            {
+                var d = _sim.Store.Detectors[s.Index];
+                rows.Add(new[]
+                {
+                    s.Line.ToString(), s.Detector.ToString(), s.IsAnalog ? "Analog" : "Digital",
+                    s.Label ?? "", s.ShortGasName ?? "", s.Unit ?? "",
+                    d.Enabled ? "1" : "0", d.Measurement.ToString()
+                });
+            }
+            MiniXlsx.WriteSheet(sfd.FileName, rows);
+            Log($"Exported {_config.Sensors.Count} detectors to {Path.GetFileName(sfd.FileName)}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, "Kunde inte exportera: " + ex.Message, "Fel", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
     private void ClearAlarms()
     {
         var row = CurrentGridRow();
         if (row is null || row.Tag is not Sensor s) return;
         int line = s.Line;
         int det = s.Detector;
-        _sim.SetAlarm(line, det, AlarmBits.None);
+        _sim.ResetDetector(line, det);
         var d = _sim.Store.Detectors[s.Index];
+        row.Cells["meas"].Value = d.Measurement;
         row.Cells["alarms"].Value = AlarmBits.None.ToString();
+        ConfigureMeasurementEditorRange(s, d.Measurement);
         RefreshGridRowAppearance(row, d);
         _lblAlarms.Text = "Aktiva larm: None";
         _lblAlarms.ForeColor = Color.Black;
-        Log($"L{line}D{det}: alarms cleared");
+        Log($"L{line}D{det}: reset (value={d.Measurement}, alarms cleared)");
     }
 
     private void ApplyDetectorStatus()

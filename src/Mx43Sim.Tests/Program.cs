@@ -62,6 +62,7 @@ internal static class Program
             TestCfgParser();
             TestAddressListParser();
             TestSelfUpdater();
+            TestXlsxRoundtrip();
             TestRegisterStore();
             TestConfigVirtualRead();
             TestModbusServer();
@@ -721,6 +722,24 @@ internal static class Program
         unrelatedPointerOffset = 20;
         BitConverter.TryWriteBytes(project.AsSpan(unrelatedPointerOffset, 4), macroOffset);
         return project;
+    }
+
+    private static void TestXlsxRoundtrip()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "mx43-roundtrip-" + Guid.NewGuid().ToString("N") + ".xlsx");
+        try
+        {
+            Mx43Sim.Core.Cfg.MiniXlsx.WriteSheet(path, new[]
+            {
+                new[] { "Line", "Det", "Label", "Mätning" },
+                new[] { "1", "2", "A & B <x>", "-15" },
+            });
+            var g = Mx43Sim.Core.Cfg.MiniXlsx.ReadSheet(path);
+            Assert("xlsx header", g[1, 1], "Line");
+            Assert("xlsx label escaped", g[2, 3], "A & B <x>");
+            Assert("xlsx number", g[2, 4], "-15");
+        }
+        finally { File.Delete(path); }
     }
 
     private static void WriteSyntheticTag(BinaryWriter writer, string name, string address)
