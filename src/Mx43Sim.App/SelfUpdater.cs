@@ -65,16 +65,75 @@ public static class SelfUpdater
             $"En ny version finns: {info.tag_name}\n" +
             $"Installerad version: {CurrentVersion}\n\n" +
             $"Ändringslogg:\n{info.body}\n\n" +
-            $"Vill du öppna releasesidan?";
+            $"Vill du uppdatera nu? Appen startas om efter uppdateringen.";
         var result = MessageBox.Show(owner, msg, "Uppdatering tillgänglig",
             MessageBoxButtons.YesNo, MessageBoxIcon.Information);
-        if (result == DialogResult.Yes)
+        if (result != DialogResult.Yes) return;
+        _ = DownloadAndRestartAsync(owner, info);
+    }
+
+    private static void OpenReleasePage(ReleaseInfo info)
+        => Process.Start(new ProcessStartInfo { FileName = info.html_url, UseShellExecute = true });
+
+    /// <summary>
+    /// Downloads the release zip, extracts Mx43Sim.exe and hands over to a
+    /// small .cmd script that waits for this process to exit, swaps the exe
+    /// and starts the new version. Falls back to the release page on error.
+    /// </summary>
+    private static async Task DownloadAndRestartAsync(Form owner, ReleaseInfo info)
+    {
+        try
         {
+            var target = Environment.ProcessPath;
+            var asset = info.assets.Find(a => a.name.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase));
+            if (asset is null || target is null ||
+                !string.Equals(Path.GetFileName(target), "Mx43Sim.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                OpenReleasePage(info);
+                return;
+            }
+
+            var work = Path.Combine(Path.GetTempPath(), "Mx43Sim-update-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(work);
+            var zipPath = Path.Combine(work, "update.zip");
+            using (var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) })
+            {
+                http.DefaultRequestHeaders.Add("User-Agent", "Mx43Sim-SelfUpdater");
+                await using var src = await http.GetStreamAsync(asset.browser_download_url);
+                await using var dst = File.Create(zipPath);
+                await src.CopyToAsync(dst);
+            }
+            System.IO.Compression.ZipFile.ExtractToDirectory(zipPath, work);
+            var newExe = Path.Combine(work, "Mx43Sim.exe");
+            if (!File.Exists(newExe)) throw new FileNotFoundException("Mx43Sim.exe saknas i uppdateringen.");
+
+            var script = Path.Combine(work, "update.cmd");
+            File.WriteAllText(script,
+                "@echo off\r\n" +
+                "set /a n=0\r\n" +
+                ":retry\r\n" +
+                "set /a n+=1\r\n" +
+                "if %n% GTR 60 exit /b 1\r\n" +
+                "timeout /t 1 /nobreak >nul\r\n" +
+                $"move /y \"{newExe}\" \"{target}\" >nul 2>&1\r\n" +
+                "if errorlevel 1 goto retry\r\n" +
+                $"start \"\" \"{target}\"\r\n" +
+                "(goto) 2>nul & rmdir /s /q \"" + work + "\"\r\n");
             Process.Start(new ProcessStartInfo
             {
-                FileName = info.html_url,
-                UseShellExecute = true,
+                FileName = script,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
             });
+            Application.Exit();
+        }
+        catch (Exception ex)
+        {
+            var r = MessageBox.Show(owner,
+                "Kunde inte uppdatera automatiskt: " + ex.Message + "\n\nÖppna releasesidan istället?",
+                "Uppdatering", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (r == DialogResult.Yes) OpenReleasePage(info);
         }
     }
 
@@ -100,5 +159,12 @@ public static class SelfUpdater
         public string tag_name { get; set; } = "";
         public string html_url { get; set; } = "";
         public string body { get; set; } = "";
+        public System.Collections.Generic.List<AssetInfo> assets { get; set; } = new();
+    }
+
+    private sealed class AssetInfo
+    {
+        public string name { get; set; } = "";
+        public string browser_download_url { get; set; } = "";
     }
 }
