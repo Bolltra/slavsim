@@ -26,8 +26,13 @@ Verified against both available template families:
 - A `.cxob` is a gzip-compressed tar archive.
 - Older cMT archives store the payload at `mt8000/project`; newer archives use
   `project` at the archive root.
-- The separate `script` entry is opaque compiled macro material. It is preserved
-  byte-for-byte by the patcher.
+- The separate `script` entry is the HMI install shell script, not compiled
+  macro code. It is preserved byte-for-byte by the patcher.
+- Compiled macro bytecode lives in `project` after the `DATA_LOG` marker: per
+  macro a deduplicated table of 8-byte constants followed by 8-byte instruction
+  records. Tag addresses are resolved into that constant table at compile time,
+  so patching `ENHANCEDTAGS_L32` alone does not change what a macro reads. The
+  text under `MACRO_ID` is source kept for decompile.
 - Repacking changes tar metadata and ordering but an unchanged repack has still
   decompiled successfully. Logical entry content is therefore more important
   than byte-identical tar metadata for the tested templates.
@@ -182,7 +187,7 @@ required because OOXML validity alone cannot validate EasyBuilder semantics.
 ## Remaining Unknowns
 
 - Complete object/window serialization.
-- Compiled `script` encoding and macro execution metadata.
+- Macro bytecode instruction encoding (constant tables are located, opcodes are not mapped).
 - Data Sampling and Trend Display records inside the proprietary project payload.
 - Integrity or checksum fields beyond gzip/tar checksums.
 - Whether all EasyBuilder versions use the same mapped record layouts.

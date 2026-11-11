@@ -1,0 +1,158 @@
+macro_command main()
+// MX43 Runtime  (universal slave-display template, macro ID 21)
+// Startup: yes.  Periodic: every 1 s (10 x 100 ms).
+//
+// Reads the live measurement and alarm word of every slot found by
+// "MX43 Scan" and publishes them at fixed LW addresses, so screen objects,
+// Data Sampling and trends never need per-site addresses.
+
+short tabAddr[32]
+short tabHigh[32]
+short tabDec[32]
+short raw[32]
+short bits[32]
+short sev[32]
+float eng[32]
+short rt[3]
+short dig[6]
+char txt[8]
+short scanState, errCode, adr, s, lwBase, reg, k, p, idx, nd, neg
+short m, b, sv, highLvl, decimals, worst
+int v, q
+float f, d
+
+GetData(scanState, "cMT", LW, 3321, 1)
+if scanState == 2 then
+    GetData(tabAddr[0], "cMT", LW, 3400, 32)
+    GetData(tabHigh[0], "cMT", LW, 3440, 32)
+    GetData(tabDec[0], "cMT", LW, 3480, 32)
+    // Start from the last published values so a failed read keeps them.
+    GetData(eng[0], "cMT", LW, 4000, 32)
+    GetData(raw[0], "cMT", LW, 4100, 32)
+    GetData(bits[0], "cMT", LW, 4200, 32)
+    GetData(sev[0], "cMT", LW, 4300, 32)
+
+    worst = 0
+    for s = 0 to 31
+        adr = tabAddr[s]
+        if adr > 0 then
+            m = 0
+            b = 0
+            reg = 2000 + adr
+            GetDataEx(m, "MX43", 3x, reg, 1)
+            GetError(errCode)
+            if errCode == 0 then
+                reg = 2300 + adr
+                GetDataEx(b, "MX43", 3x, reg, 1)
+                GetError(errCode)
+            end if
+            if errCode == 0 then
+                highLvl = tabHigh[s]
+                decimals = tabDec[s]
+                lwBase = (s + 1) * 100
+
+                // 0 normal, 1 yellow, 2 orange, 3 red.  The highest
+                // configured alarm level and every fault state are red.
+                sv = 0
+                if (b & 0x007C) <> 0 then
+                    sv = 3
+                else if (b & 0x0002) <> 0 then
+                    sv = 2
+                    if highLvl == 2 then
+                        sv = 3
+                    end if
+                else if (b & 0x0001) <> 0 then
+                    sv = 1
+                    if highLvl == 1 then
+                        sv = 3
+                    end if
+                end if
+
+                d = 1
+                if decimals == 1 then
+                    d = 10
+                end if
+                if decimals == 2 then
+                    d = 100
+                end if
+                if decimals == 3 then
+                    d = 1000
+                end if
+                if decimals == 4 then
+                    d = 10000
+                end if
+                f = m
+                eng[s] = f / d
+                raw[s] = m
+                bits[s] = b
+                sev[s] = sv
+
+                rt[0] = m
+                rt[1] = b
+                rt[2] = m
+                reg = lwBase + 70
+                SetData(rt[0], "cMT", LW, reg, 3)
+                reg = lwBase + 75
+                SetData(sv, "cMT", LW, reg, 1)
+
+                // Measurement as text with the right decimals.
+                v = m
+                neg = 0
+                if v < 0 then
+                    neg = 1
+                    v = 0 - v
+                end if
+                for k = 0 to 5
+                    q = v / 10
+                    dig[k] = v - q * 10
+                    v = q
+                next k
+                nd = decimals + 1
+                for k = 0 to 5
+                    if dig[k] <> 0 then
+                        if k + 1 > nd then
+                            nd = k + 1
+                        end if
+                    end if
+                next k
+                FILL(txt[0], 0, 8)
+                p = 0
+                if neg == 1 then
+                    txt[p] = 45
+                    p = p + 1
+                end if
+                for k = 0 to 5
+                    idx = nd - 1 - k
+                    if idx >= 0 then
+                        txt[p] = 48 + dig[idx]
+                        p = p + 1
+                        if idx == decimals then
+                            if decimals > 0 then
+                                txt[p] = 46
+                                p = p + 1
+                            end if
+                        end if
+                    end if
+                next k
+                reg = lwBase + 96
+                SetData(txt[0], "cMT", LW, reg, 8)
+            end if
+            if sev[s] > worst then
+                worst = sev[s]
+            end if
+        else
+            eng[s] = 0
+            raw[s] = 0
+            bits[s] = 0
+            sev[s] = 0
+        end if
+    next s
+
+    SetData(eng[0], "cMT", LW, 4000, 32)
+    SetData(raw[0], "cMT", LW, 4100, 32)
+    SetData(bits[0], "cMT", LW, 4200, 32)
+    SetData(sev[0], "cMT", LW, 4300, 32)
+    SetData(worst, "cMT", LW, 3330, 1)
+end if
+
+end macro_command

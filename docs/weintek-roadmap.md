@@ -1,5 +1,13 @@
 # Weintek Generator Roadmap
 
+## Direction
+
+The goal is a slave display that needs no EasyBuilder work per site. The chosen
+path is the self-configuring template in `weintek-universal-template.md`: one
+`.cxob` that discovers the detectors over Modbus. Its macros and logic tests are
+done; the one-time template build in EasyBuilder remains. The cfg-driven
+generator below stays as the fallback and as the reference for expected output.
+
 ## Near Term
 
 - Validate imported generated EBM macros and offline simulator behavior for both digital and analog configurations; CXOB decompile/full-compile round trips now pass.

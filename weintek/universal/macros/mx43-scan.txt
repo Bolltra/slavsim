@@ -1,0 +1,299 @@
+macro_command main()
+// MX43 Scan  (universal slave-display template, macro ID 20)
+// Startup: yes.  Periodic: every 5 s (50 x 100 ms).
+//
+// Finds every configured detector on the MX43 by reading all 264
+// configuration request addresses (256 digital + 8 analog), packs the
+// first 32 into display slots 1..32 and copies each slot's 68-word
+// configuration block to LW (slot * 100).  No per-site data is compiled in.
+//
+// A full scan runs at startup, when the MX43 CRC (3x-2600/2601) changes,
+// when LW-3327 is set to 1, and every 10 minutes.  Every run refreshes the
+// configuration of the slots already found (ON/OFF status, thresholds).
+
+short info[68]
+short zero[100]
+short infoBlk[4]
+short chkBlk[4]
+short stat[10]
+short actAddr[32]
+short tabAddr[32]
+short tabHigh[32]
+short tabDec[32]
+short ext[2]
+short ext2[4]
+short vals[4]
+short dig[6]
+char txt[8]
+short errCode, adr, n, foundCnt, s, lwBase, reg, k, j, p, idx, nd, neg
+short needScan, linkOk, committed
+short enFlags, lv1, lv2, lv3, cnt, highLvl, decimals, scaleDiv, lineNo, detNo
+int v, q
+
+FILL(zero[0], 0, 100)
+GetData(stat[0], "cMT", LW, 3320, 10)
+
+// ---- 1. Link check: INFO block (CRC32 + second counter) ----
+linkOk = 0
+FILL(infoBlk[0], 0, 4)
+GetDataEx(infoBlk[0], "MX43", 3x, 2600, 4)
+GetError(errCode)
+if errCode == 0 then
+    linkOk = 1
+end if
+stat[2] = linkOk
+SetData(stat[2], "cMT", LW, 3322, 1)
+
+if linkOk == 1 then
+
+    // ---- 2. Decide whether a full scan is needed ----
+    needScan = 0
+    if stat[1] <> 2 then
+        needScan = 1
+    end if
+    if stat[7] == 1 then
+        needScan = 1
+    end if
+    if infoBlk[0] <> stat[5] then
+        needScan = 1
+    end if
+    if infoBlk[1] <> stat[6] then
+        needScan = 1
+    end if
+    stat[9] = stat[9] + 1
+    if stat[9] >= 120 then
+        needScan = 1
+    end if
+
+    committed = 0
+    if needScan == 1 then
+        if stat[1] <> 2 then
+            stat[1] = 1
+            SetData(stat[1], "cMT", LW, 3321, 1)
+        end if
+
+        // ---- 3. Pass 1: collect the configured request addresses ----
+        n = 0
+        foundCnt = 0
+        for adr = 1 to 264
+            FILL(info[0], 0, 68)
+            GetDataEx(info[0], "MX43", 3x, adr, 68)
+            GetError(errCode)
+            if errCode == 0 then
+                // A slot is configured when it has a label and a range.
+                if info[0] <> 0 then
+                    if info[37] <> 0 then
+                        foundCnt = foundCnt + 1
+                        if n < 32 then
+                            actAddr[n] = adr
+                            n = n + 1
+                        end if
+                    end if
+                end if
+            end if
+        next adr
+
+        // ---- 4. Commit only if the link survived the whole scan ----
+        FILL(chkBlk[0], 0, 4)
+        GetDataEx(chkBlk[0], "MX43", 3x, 2600, 4)
+        GetError(errCode)
+        if errCode == 0 then
+            for s = 0 to 31
+                if s < n then
+                    tabAddr[s] = actAddr[s]
+                else
+                    tabAddr[s] = 0
+                end if
+                tabHigh[s] = 0
+                tabDec[s] = 0
+                lwBase = (s + 1) * 100
+                SetData(zero[0], "cMT", LW, lwBase, 100)
+            next s
+            SetData(tabAddr[0], "cMT", LW, 3400, 32)
+            SetData(tabHigh[0], "cMT", LW, 3440, 32)
+            SetData(tabDec[0], "cMT", LW, 3480, 32)
+            stat[0] = n
+            stat[1] = 2
+            stat[3] = foundCnt
+            stat[4] = 0
+            if foundCnt > 32 then
+                stat[4] = 1
+            end if
+            stat[5] = infoBlk[0]
+            stat[6] = infoBlk[1]
+            stat[7] = 0
+            stat[8] = stat[8] + 1
+            stat[9] = 0
+            committed = 1
+        else
+            stat[2] = 0
+        end if
+    end if
+
+    // ---- 5. Refresh the configuration of every used slot ----
+    if stat[1] == 2 then
+        GetData(tabAddr[0], "cMT", LW, 3400, 32)
+        GetData(tabHigh[0], "cMT", LW, 3440, 32)
+        GetData(tabDec[0], "cMT", LW, 3480, 32)
+        for s = 0 to 31
+            adr = tabAddr[s]
+            if adr > 0 then
+                FILL(info[0], 0, 68)
+                GetDataEx(info[0], "MX43", 3x, adr, 68)
+                GetError(errCode)
+                if errCode == 0 then
+                    lwBase = (s + 1) * 100
+                    // LW base+0..67 mirrors the MX43 block one to one.
+                    SetData(info[0], "cMT", LW, lwBase, 68)
+
+                    // Decimal places and scale divisor.
+                    decimals = info[38]
+                    if decimals < 0 then
+                        decimals = 0
+                    end if
+                    if decimals > 4 then
+                        decimals = 4
+                    end if
+                    scaleDiv = 1
+                    if decimals == 1 then
+                        scaleDiv = 10
+                    end if
+                    if decimals == 2 then
+                        scaleDiv = 100
+                    end if
+                    if decimals == 3 then
+                        scaleDiv = 1000
+                    end if
+                    if decimals == 4 then
+                        scaleDiv = 10000
+                    end if
+
+                    // Configured alarm levels: threshold set and enabled,
+                    // instantaneous (bits 0..2) or averaged (bits 3..5).
+                    enFlags = info[65]
+                    lv1 = 0
+                    lv2 = 0
+                    lv3 = 0
+                    if info[51] <> 0 then
+                        if (enFlags & 0x0001) <> 0 then
+                            lv1 = 1
+                        end if
+                    end if
+                    if info[54] <> 0 then
+                        if (enFlags & 0x0008) <> 0 then
+                            lv1 = 1
+                        end if
+                    end if
+                    if info[52] <> 0 then
+                        if (enFlags & 0x0002) <> 0 then
+                            lv2 = 1
+                        end if
+                    end if
+                    if info[55] <> 0 then
+                        if (enFlags & 0x0010) <> 0 then
+                            lv2 = 1
+                        end if
+                    end if
+                    if info[53] <> 0 then
+                        if (enFlags & 0x0004) <> 0 then
+                            lv3 = 1
+                        end if
+                    end if
+                    if info[56] <> 0 then
+                        if (enFlags & 0x0020) <> 0 then
+                            lv3 = 1
+                        end if
+                    end if
+                    cnt = lv1 + lv2 + lv3
+                    highLvl = 0
+                    if lv1 == 1 then
+                        highLvl = 1
+                    end if
+                    if lv2 == 1 then
+                        highLvl = 2
+                    end if
+                    if lv3 == 1 then
+                        highLvl = 3
+                    end if
+                    tabHigh[s] = highLvl
+                    tabDec[s] = decimals
+
+                    ext[0] = scaleDiv
+                    ext[1] = cnt
+                    reg = lwBase + 73
+                    SetData(ext[0], "cMT", LW, reg, 2)
+
+                    // Line / detector number (line 0 = analog channel).
+                    if adr <= 256 then
+                        lineNo = (adr - 1) / 32 + 1
+                        detNo = adr - (lineNo - 1) * 32
+                    else
+                        lineNo = 0
+                        detNo = adr - 256
+                    end if
+                    ext2[0] = 1
+                    ext2[1] = adr
+                    ext2[2] = lineNo
+                    ext2[3] = detNo
+                    reg = lwBase + 76
+                    SetData(ext2[0], "cMT", LW, reg, 4)
+
+                    // Ready-formatted texts with the right decimals:
+                    // range, alarm 1, alarm 2, alarm 3 (8 characters each).
+                    vals[0] = info[37]
+                    vals[1] = info[51]
+                    vals[2] = info[52]
+                    vals[3] = info[53]
+                    for j = 0 to 3
+                        v = vals[j]
+                        neg = 0
+                        if v < 0 then
+                            neg = 1
+                            v = 0 - v
+                        end if
+                        for k = 0 to 5
+                            q = v / 10
+                            dig[k] = v - q * 10
+                            v = q
+                        next k
+                        nd = decimals + 1
+                        for k = 0 to 5
+                            if dig[k] <> 0 then
+                                if k + 1 > nd then
+                                    nd = k + 1
+                                end if
+                            end if
+                        next k
+                        FILL(txt[0], 0, 8)
+                        p = 0
+                        if neg == 1 then
+                            txt[p] = 45
+                            p = p + 1
+                        end if
+                        for k = 0 to 5
+                            idx = nd - 1 - k
+                            if idx >= 0 then
+                                txt[p] = 48 + dig[idx]
+                                p = p + 1
+                                if idx == decimals then
+                                    if decimals > 0 then
+                                        txt[p] = 46
+                                        p = p + 1
+                                    end if
+                                end if
+                            end if
+                        next k
+                        reg = lwBase + 80 + j * 4
+                        SetData(txt[0], "cMT", LW, reg, 8)
+                    next j
+                end if
+            end if
+        next s
+        SetData(tabHigh[0], "cMT", LW, 3440, 32)
+        SetData(tabDec[0], "cMT", LW, 3480, 32)
+    end if
+end if
+
+SetData(stat[0], "cMT", LW, 3320, 10)
+
+end macro_command
